@@ -1,0 +1,8 @@
+input_hw: [32, 32]
+emb_dim: 4
+depth: 6
+num_down: 4
+channel_grow: 2
+heads: 8
+drop: 0.0
+rope: true

@@ -1,0 +1,4 @@
+emb_dim: 16
+channels: 32
+depth: 6
+heads: 8

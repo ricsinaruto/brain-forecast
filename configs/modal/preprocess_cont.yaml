@@ -1,0 +1,24 @@
+# Configuration for preprocessing pipeline
+# Paths should be adjusted per environment
+
+# Root directory containing raw dataset
+data_path: "/vol/data/datasets/Omega/raw"
+save_path: "/vol/data/datasets/Omega/preprocessed_cont"
+delete_fif: false
+maxwell: false
+
+# Number of dask workers used by osl-ephys
+n_workers: 4
+
+# Length of each saved chunk in seconds
+chunk_seconds: 10
+
+# Optional path to a custom OSL preprocessing config
+osl_config: configs/osl.yaml
+
+# Parameters for additional stage-2 processing
+preproc_config:
+  normalize:
+    method: "robust"
+  clip:
+    std_factor: 5

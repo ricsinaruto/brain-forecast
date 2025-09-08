@@ -1,0 +1,47 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/models/brainomni.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/brainomni
+resume_from: null
+
+model_name: BrainOmniSystem
+loss_name: CrossEntropyWithCodes
+
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_cont
+  example_seconds: 2
+  overlap_seconds: 1
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 128
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+loss: {}
+
+lightning:
+  lr: 0.001
+  weight_decay: 0.001
+  compile: true
+  log_samples: false
+
+trainer:
+  max_epochs: 100
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 20
+  precision: 16-mixed

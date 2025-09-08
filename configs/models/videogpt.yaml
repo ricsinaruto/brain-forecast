@@ -1,0 +1,4 @@
+tokenizer_path: trainings/videogpttokenizer/lightning_logs/version_14/checkpoints/epoch=299-step=300.ckpt
+hidden_dim: 120
+heads: 8
+layers: 4

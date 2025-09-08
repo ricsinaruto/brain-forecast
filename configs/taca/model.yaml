@@ -1,0 +1,9 @@
+H: 32
+W: 32
+quant_levels: 256
+dim: 64
+heads: 8
+enc_layers: 8
+pool: [4, 4]
+dropout: 0.0
+max_T: 200

@@ -1,0 +1,6 @@
+time_mask:
+  width: 0
+time_warp:
+  warp: 0
+mixup:
+  alpha: 0.0

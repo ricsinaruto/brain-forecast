@@ -1,0 +1,44 @@
+model_config: configs/wavenet3d/model.yaml
+augmentations: configs/local/augmentations.yaml
+
+save_dir: /vol/data/trainings/wavenet3d
+resume_from: null
+
+model_name: Wavenet3D
+loss_name: CrossEntropy
+
+datasplitter:
+  dataset_class: ChunkDatasetImageQuantized
+  dataset_root: /vol/data/datasets/Omega/preprocessed
+  example_seconds: 2
+  overlap_seconds: 1
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 16
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+loss:
+  label_smoothing: 0.0
+  l1: 0.0
+
+lightning:
+  lr: 0.0005
+  weight_decay: 0.0
+  compile: true
+  log_samples: false
+  log_psd: false
+  sfreq: 200
+
+trainer:
+  max_epochs: 1000
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 20
+  precision: 16-mixed

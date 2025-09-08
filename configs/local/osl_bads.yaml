@@ -1,0 +1,11 @@
+meta:
+  event_codes:
+preproc:
+  - apply_gradient_compensation: {grade: 3}
+  - notch_filter:       {freqs: 60 120, phase: 'minimum'}
+  - filter:             {l_freq: 0.1, h_freq: 100, phase: 'minimum'}
+  - resample:           {sfreq: 200}
+  - bad_channels:       {picks: 'mag'}
+  - bad_channels:       {picks: 'grad'}
+  - interpolate_bads:   {}
+

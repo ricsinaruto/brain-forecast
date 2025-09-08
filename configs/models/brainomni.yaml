@@ -1,0 +1,22 @@
+latent_channels: 16  # original used 16
+codebook_size: 1024  # original used 512
+num_quantizers: 4
+
+tokenizer_path: trainings/brainomni_tok_modal/epoch=24-step=750.ckpt
+# tokenizer_path: /vol/data/trainings/brainomni_tok/lightning_logs/version_13/checkpoints/epoch=24-step=750.ckpt
+
+forecaster:
+  emb_dim: 128
+  depth: 4
+  num_heads: 8
+  dropout: 0.1
+  max_time_steps: 1024
+  rotary_base: 10000
+
+tokenizer:
+  in_channels: 272
+  base_channels: 32
+  encoder_depth: 3
+  emb_dim: 128  # original used 256
+  num_types: 4
+  num_positions: 2

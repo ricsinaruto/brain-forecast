@@ -1,0 +1,12 @@
+quant_levels: 256
+d_model: 64
+n_heads: 8
+n_layers: 4
+max_T: 200
+max_H: 32
+max_W: 32
+m_hw: 256
+m_ht: 512
+m_wt: 512
+dropout: 0.0
+layer_type: LITRALayer

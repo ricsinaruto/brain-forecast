@@ -1,0 +1,6 @@
+*.code-workspace
+*.vscode
+*.egg-info
+*.pyc
+*.DS_Store
+trainings/

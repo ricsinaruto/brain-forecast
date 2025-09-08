@@ -1,0 +1,43 @@
+model_config: configs/models/emu3visionvq.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: trainings/emu3visionvq
+resume_from: null
+
+model_name: Emu3VisionVQ
+loss_name: VQVAELoss
+
+datasplitter:
+  dataset_class: ChunkDatasetImage
+  dataset_root: /Users/richard/Datasets/Omega/preprocessed_cont
+  example_seconds: 1
+  overlap_seconds: 0
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 1
+  num_workers: 0
+  prefetch_factor: null
+  pin_memory: false
+  persistent_workers: false
+
+loss: {}
+
+lightning:
+  lr: 0.0001
+  weight_decay: 0.0
+  compile: false
+  log_samples: false
+  log_psd: false
+  sfreq: 200
+
+trainer:
+  max_epochs: 1000
+  accelerator: mps
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 100
+  log_every_n_steps: 10
+  overfit_batches: 1
+  gradient_clip_val: 1.0

@@ -1,0 +1,10 @@
+vocab_size: 131072
+save_dir: trainings/fast
+
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /Users/richard/Datasets/Omega/preprocessed_cont
+  example_seconds: 1.0  # try different values
+  overlap_seconds: 0.5
+  val_ratio: 0.1
+  test_ratio: 0.1

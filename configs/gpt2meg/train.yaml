@@ -1,0 +1,47 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/models/gpt2meg.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/gpt2meg
+resume_from: null
+
+model_name: GPT2MEG
+loss_name: CrossEntropy
+
+datasplitter:
+  dataset_root: "/vol/data/datasets/Omega/preprocessed"
+  example_seconds: 2
+  overlap_seconds: 1
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 8
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+loss:
+  label_smoothing: 0.1
+  l1: 0.0
+
+lightning:
+  lr: 0.001
+  weight_decay: 0.01
+  compile: true
+
+trainer:
+  max_epochs: 100
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 50
+  precision: 16-mixed

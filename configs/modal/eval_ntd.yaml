@@ -1,0 +1,37 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/models/ntd.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/ntd
+resume_from: null
+
+model_name: NTD
+loss_name: NTDLoss
+eval_class: EvalNTD
+
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_cont
+  example_seconds: 2
+  overlap_seconds: 0
+  val_ratio: 0.1
+  test_ratio: 0.01
+
+dataloader:
+  batch_size: 512
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  pin_memory_device: cuda
+
+eval:
+  accelerator: cuda
+  future_steps: 20
+  gen_seconds: 60
+  ckpt_path: /vol/data/trainings/ntd/lightning_logs/version_0/checkpoints/epoch=139-step=4200.ckpt

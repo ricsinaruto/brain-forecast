@@ -1,0 +1,7 @@
+embedding_dim: 64
+n_codes: 4096
+n_hiddens: 128
+n_res_layers: 4
+sequence_length: 200
+resolution: 32
+downsample: [2, 16, 16]
