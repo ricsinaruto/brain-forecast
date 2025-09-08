@@ -1,4 +1,4 @@
-# ephys-gpt
+# brain-forecast
 
 Neural signal modeling toolkit for MEG/ephys research. This repo provides:
 
@@ -156,9 +156,6 @@ Model configs live under `configs/**/model.yaml` and are fed to constructors by 
 - Open a PR with a concise description, config snippet, and a passing `pytest`
 
 
-**Extras**
-- `scripts/` includes dataset download helpers and Modal cloud orchestration (`modal_app.py`). These are optional utilities.
-
 Known notes
 - Some example configs may reference paths you’ll need to adjust (e.g., model config path under `configs/models/`).
 - Certain eval runners are marked “not tested” in code comments; prefer `EvalQuant` unless your model matches the specialized interface.
@@ -174,7 +171,6 @@ Known notes
 - NTD (diffusion): Continuous diffusion over multi‑channel signals; forward returns `(noise, pred_noise, mask)` for NLL/MSE‑like training, and `forecast(past, horizon)` generates future samples in `(B, C, Lp+N)`. Inputs are real‑valued `(B, C, L)`, optional conditioning channels and forecast masks are supported via `mask_channel/p_forecast`.
 - WavenetFullChannel: Causal dilated 1‑D convs over quantized channels; input is integer tokens `(B, C, T)` and output is logits `(B, C, T, Q)` where Q is the number of quantization levels. Optional global/local conditioning and channel‑wise learned token embeddings are supported.
 - Wavenet3D: Spatio‑temporal WaveNet operating on `(B, H, W, T)` integer tokens with 3‑D dilated causal convolutions over time and 2‑D kernels over space; outputs `(B, H, W, T, Q)` logits. Use with `ChunkDatasetImageQuantized` for topomap‑token AR.
-- CNNLSTM: Hybrid conv frontend + optional BiLSTM + transformer blocks with attention pooling or “last” pooling; expects continuous `(B, C, T)` and returns classification logits `(B, num_classes)`. Designed for label classification tasks (e.g., LibriBrain phonemes) with optional mixup in the dataloader.
 - Baseline CNNs: `CNNMultivariate`/`CNNUnivariate` apply causal 1‑D conv stacks to continuous inputs `(B, C, T)` and output same‑shape reconstructions/forecasts; `*Quantized` variants embed integer tokens and output `(B, C, T, V)` logits. Useful as light baselines for sanity checks and ablations.
 - VideoGPTTokenizer: VQ‑VAE for `(T, H, W)` sequences; accepts `(H, W, T)` or `(B, H, W, T)` and returns reconstruction plus VQ outputs (`encodings`, `embeddings`). Used to turn topomap videos into discrete token grids; decode returns `(B, H, W, T)`.
 - Emu3VisionVQ: Alternative video tokenizer (configurable embed/channels/codebook size) suitable for `(H, W, T)` inputs from `ChunkDatasetImage`; encode returns latent quantized codes and embeddings, decode reconstructs to `(B, H, W, T)`. Pair with VQ‑AR forecasters such as VQGPT2MEG.
