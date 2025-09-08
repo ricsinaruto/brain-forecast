@@ -9,13 +9,13 @@ Neural signal modeling toolkit for MEG/ephys research. This repo provides:
 - A lightweight test suite that checks shapes and causal gradients
 
 
-**Install**
+## Install
 - Python: 3.13 (see `setup.py`)
 - Create env, then install: `pip install -e .`
 - Preprocessing requires `osl-ephys` (install separately) and MNE. See `requirements.txt` for other deps.
 
 
-**Repo Structure**
+## Repo structure
 - `ephys_gpt/preprocessing`: OSL-ephys wrapper + custom stage-2 transforms (normalize, clip, µ-law)
 - `ephys_gpt/dataset`: Datasets, augmentations, split utilities, mixup dataloader
 - `ephys_gpt/models`: Model zoo (GPT2MEG, ST-GPT, BENDR, MEGFormer, NTD, Wavenets, VQ/VAE tokenizers, etc.)
@@ -27,7 +27,7 @@ Neural signal modeling toolkit for MEG/ephys research. This repo provides:
 - Entrypoints: `preprocess.py` (preproc) and `run.py` (train/test/eval/tokenizer)
 
 
-**Data Preprocessing**
+## Data Preprocessing
 Stage 1 runs the OSL-ephys pipeline, Stage 2 applies custom transforms and saves chunked `.npy` arrays.
 
 - Config template: `configs/local/preprocess.yaml`
@@ -46,7 +46,7 @@ Notes
 - `Omega` loader discovers `sub-*/ses-*/meg/*.ds` folders and builds subject/session names.
 
 
-**Training**
+## Training
 Use `run.py` with a train YAML. Trainer/dataloader/model/loss are configured from file.
 
 - Example (Ωmega + GPT2MEG):
@@ -69,7 +69,7 @@ Train YAML (common keys)
 - `trainer`: PyTorch Lightning `Trainer` args (accelerator, precision, epochs)
 
 
-**Evaluation**
+## Evaluation
 Evaluations are run via the same entrypoint with `--mode eval` and an eval YAML.
 
 - Example (quantized AR):
@@ -84,7 +84,7 @@ Evaluations are run via the same entrypoint with `--mode eval` and an eval YAML.
 - Outputs: saved under `<save_dir>/evals` (curves as `.npy` and `.pdf/.png`, PSD/cov for generated/test sequences).
 
 
-**Datasets**
+## Datasets
 Constructed via `ephys_gpt.dataset.datasplitter`. Two families:
 
 - Chunked Ωmega examples:
@@ -105,7 +105,7 @@ Loaders
 - Standard `torch.utils.data.DataLoader` or `MixupDataLoader` (mixup with optional quantization on-the-fly)
 
 
-**Models (brief)**
+## Model families
 - Autoregressive (quantized): `GPT2MEG`, `STGPT2MEG`, `VQGPT2MEG` (tokenizer + AR transformer)
 - Tokenizers/VQ: `VideoGPTTokenizer`, `Emu3VisionVQ`, `BrainTokenizer` (RVQ-like)
 - Continuous forecasting: `BENDRForecast` (encoder-decoder), `NTD` (diffusion)
@@ -117,12 +117,12 @@ Loaders
 Model configs live under `configs/**/model.yaml` and are fed to constructors by `ExperimentDL`.
 
 
-**Losses & Metrics**
+## Losses & Metrics
 - Losses: `CrossEntropy`, `MSE`, `NLL` (flows), `VQVAELoss`, `VQNSPLoss`, `BrainTokenizerLoss`
 - Metrics (classification): accuracy, top‑k accuracy, micro‑F1
 
 
-**CLI Entry Points**
+## CLI
 - Preprocess: `python preprocess.py --dataset omega --stage <stage_1|stage_2|both> --args <yaml>`
 - Train: `python run.py --mode train --args <yaml>`
 - Test: `python run.py --mode test --args <yaml>`
@@ -130,13 +130,13 @@ Model configs live under `configs/**/model.yaml` and are fed to constructors by 
 - Tokenizer fitting (FAST example): set a config for `ExperimentTokenizer` and run `python run.py --mode tokenizer --args <yaml>`
 
 
-**Configurations**
+### Configurations
 - Examples: `configs/gpt2meg/*.yaml`, `configs/stgpt2meg/*.yaml`, `configs/cnnlstm/*.yaml`, `configs/models/*.yaml`, `configs/local/*.yaml`
 - For LibriBrain, see `configs/cnnlstm/train.yaml` (`dataset_name: libribrain` + `GroupedDatasetAugmented`)
 - For Ωmega AR, point `datasplitter.dataset_root` at `preprocessed/` from the preproc step
 
 
-**Tests**
+## Tests
 - Run: `pytest -q`
 - What’s covered:
   - Dataset builders: shapes, shifting semantics, image mapping
@@ -145,7 +145,7 @@ Model configs live under `configs/**/model.yaml` and are fed to constructors by 
   - Lightweight synthetic inputs; CPU by default
 
 
-**Contributing**
+## Contributing
 - Style: `flake8` (`.flake8` config), keep changes minimal and focused
 - Add tests for new models/datasets; mirror existing shape/causality checks
 - Plug‑in points when adding features:
@@ -161,19 +161,34 @@ Known notes
 - Certain eval runners are marked “not tested” in code comments; prefer `EvalQuant` unless your model matches the specialized interface.
 
 
-**Model Details**
-- GPT2MEG: Channel‑wise next‑token GPT built on HuggingFace GPT‑2 blocks; expects quantized integer tokens `x ∈ {0…V−1}` shaped `(B, C, T)` and returns logits `(B, C, T, V)` for predicting `x[..., t+1]` from past. Supports `n_positions` context windows and can run with cached KV states during generation; embeddings include per‑channel and optional conditioning.
-- STGPT2MEG: Spatio‑temporal transformer with channel mixing inside blocks; input/output are the same as GPT2MEG `(B, C, T) → (B, C, T, V)` but attention operates jointly over time and channels for better cross‑sensor coupling. Use for quantized AR on Ωmega chunks with richer cross‑channel dynamics.
-- VQGPT2MEG: Two‑stage pipeline that tokenizes a sequence of sparse topomap images and then autoregresses over latent codes; expects topomap tensors `(B, H, W, T)` (or tokens if `train_tokenizer=False`) and outputs `(logits, targets)` for next‑token prediction. Works with an internal VQ tokenizer (e.g., Emu3VisionVQ) or a checkpoint loaded via `tokenizer_path`.
-- BrainOmniSystem (Tokenizer + Forecast): First converts raw MEG `(x, pos, ch_type)` into residual VQ tokens with `BrainOmniTokenizer`, then predicts next tokens with `BrainOmniForecast`; input is `(B, C, T)` with sensor metadata and output is `(logits, codes_tgt)` shaped `(B, C_latent, Nq, T, K)`. Use when you want a discrete latent representation with a stage‑wise token predictor; tokenizer can be frozen or co‑trained.
-- MEGFormer: Image‑space AR with normalizing flows over patch tokens; expects image sequences `(B, H, W, T)` produced by `ChunkDatasetImage` and returns `(nll_per_token, logdet)` during training. `forecast(ctx, steps)` autoregressively samples future frames, which are mapped back to channels using dataset pixel indices for evaluation.
-- BENDRForecast: Continuous 1‑step forecaster inspired by BENDR; accepts `(x, pos, ch_type)` where `x ∈ ℝ^{B×C×T}` and returns predicted next‑sample sequences `(B, C, T_enc_or_raw)` used with MSE loss. Provides `forecast(past, horizon)` to grow sequences autoregressively using the learned 1‑step predictor; receptive field is set by the conv downsampling stack.
-- NTD (diffusion): Continuous diffusion over multi‑channel signals; forward returns `(noise, pred_noise, mask)` for NLL/MSE‑like training, and `forecast(past, horizon)` generates future samples in `(B, C, Lp+N)`. Inputs are real‑valued `(B, C, L)`, optional conditioning channels and forecast masks are supported via `mask_channel/p_forecast`.
-- WavenetFullChannel: Causal dilated 1‑D convs over quantized channels; input is integer tokens `(B, C, T)` and output is logits `(B, C, T, Q)` where Q is the number of quantization levels. Optional global/local conditioning and channel‑wise learned token embeddings are supported.
-- Wavenet3D: Spatio‑temporal WaveNet operating on `(B, H, W, T)` integer tokens with 3‑D dilated causal convolutions over time and 2‑D kernels over space; outputs `(B, H, W, T, Q)` logits. Use with `ChunkDatasetImageQuantized` for topomap‑token AR.
-- Baseline CNNs: `CNNMultivariate`/`CNNUnivariate` apply causal 1‑D conv stacks to continuous inputs `(B, C, T)` and output same‑shape reconstructions/forecasts; `*Quantized` variants embed integer tokens and output `(B, C, T, V)` logits. Useful as light baselines for sanity checks and ablations.
-- VideoGPTTokenizer: VQ‑VAE for `(T, H, W)` sequences; accepts `(H, W, T)` or `(B, H, W, T)` and returns reconstruction plus VQ outputs (`encodings`, `embeddings`). Used to turn topomap videos into discrete token grids; decode returns `(B, H, W, T)`.
-- Emu3VisionVQ: Alternative video tokenizer (configurable embed/channels/codebook size) suitable for `(H, W, T)` inputs from `ChunkDatasetImage`; encode returns latent quantized codes and embeddings, decode reconstructs to `(B, H, W, T)`. Pair with VQ‑AR forecasters such as VQGPT2MEG.
-- BrainOmniTokenizer: Residual‑vector‑quantizer for raw MEG with multiple codebook stages; input is `(x, pos, ch_type)` and output includes latent tokens `(B, C_latent, T, Nq)` and optional reconstructions. Intended to be coupled with `BrainOmniForecast` but usable standalone for representation learning.
-- ChronoFlowSSM: Flow‑based sequence model on videos `[B, T, C, H, W]∈[0,1]` with spatial flows, a temporal state‑space backbone, and a conditional emission flow; trains by exact NLL in logit space and supports long‑horizon sampling via `sample(x_context, steps)`. Useful for learned simulators and video‑like brain maps.
-- LITRA / TACA / CK3D / TASA3D: 3‑D/planar attention stacks for quantized signals; typically accept integer token grids `(B, H, W, T)` along with optional dense embeddings and return `(B, H, W, T, Q)` logits. These are research models for spatio‑temporal AR with different factorisations (tri‑plane attention, coarse‑to‑fine 3‑D, etc.).
+## Model Descriptions
+### GPT2MEG
+Channel‑wise next‑token GPT built on HuggingFace GPT‑2 blocks; expects quantized integer tokens `x ∈ {0…V−1}` shaped `(B, C, T)` and returns logits `(B, C, T, V)` for predicting `x[..., t+1]` from past. Supports `n_positions` context windows and can run with cached KV states during generation; embeddings include per‑channel and optional conditioning.
+### STGPT2MEG
+Spatio‑temporal transformer with channel mixing inside blocks; input/output are the same as GPT2MEG `(B, C, T) → (B, C, T, V)` but attention operates jointly over time and channels for better cross‑sensor coupling. Use for quantized AR on Ωmega chunks with richer cross‑channel dynamics.
+### VQGPT2MEG
+Two‑stage pipeline that tokenizes a sequence of sparse topomap images and then autoregresses over latent codes; expects topomap tensors `(B, H, W, T)` (or tokens if `train_tokenizer=False`) and outputs `(logits, targets)` for next‑token prediction. Works with an internal VQ tokenizer (e.g., Emu3VisionVQ) or a checkpoint loaded via `tokenizer_path`.
+### BrainOmniSystem (Tokenizer + Forecast)
+First converts raw MEG `(x, pos, ch_type)` into residual VQ tokens with `BrainOmniTokenizer`, then predicts next tokens with `BrainOmniForecast`; input is `(B, C, T)` with sensor metadata and output is `(logits, codes_tgt)` shaped `(B, C_latent, Nq, T, K)`. Use when you want a discrete latent representation with a stage‑wise token predictor; tokenizer can be frozen or co‑trained.
+### MEGFormer
+Image‑space AR with normalizing flows over patch tokens; expects image sequences `(B, H, W, T)` produced by `ChunkDatasetImage` and returns `(nll_per_token, logdet)` during training. `forecast(ctx, steps)` autoregressively samples future frames, which are mapped back to channels using dataset pixel indices for evaluation.
+### BENDRForecast
+Continuous 1‑step forecaster inspired by BENDR; accepts `(x, pos, ch_type)` where `x ∈ ℝ^{B×C×T}` and returns predicted next‑sample sequences `(B, C, T_enc_or_raw)` used with MSE loss. Provides `forecast(past, horizon)` to grow sequences autoregressively using the learned 1‑step predictor; receptive field is set by the conv downsampling stack.
+### NTD (diffusion)
+Continuous diffusion over multi‑channel signals; forward returns `(noise, pred_noise, mask)` for NLL/MSE‑like training, and `forecast(past, horizon)` generates future samples in `(B, C, Lp+N)`. Inputs are real‑valued `(B, C, L)`, optional conditioning channels and forecast masks are supported via `mask_channel/p_forecast`.
+### WavenetFullChannel
+Causal dilated 1‑D convs over quantized channels; input is integer tokens `(B, C, T)` and output is logits `(B, C, T, Q)` where Q is the number of quantization levels. Optional global/local conditioning and channel‑wise learned token embeddings are supported.
+### Wavenet3D
+Spatio‑temporal WaveNet operating on `(B, H, W, T)` integer tokens with 3‑D dilated causal convolutions over time and 2‑D kernels over space; outputs `(B, H, W, T, Q)` logits. Use with `ChunkDatasetImageQuantized` for topomap‑token AR.
+### ChronoFlowSSM
+Flow‑based sequence model on videos `[B, T, C, H, W]∈[0,1]` with spatial flows, a temporal state‑space backbone, and a conditional emission flow; trains by exact NLL in logit space and supports long‑horizon sampling via `sample(x_context, steps)`. Useful for learned simulators and video‑like brain maps.
+### LITRA / TACA / CK3D / TASA3D
+3‑D/planar attention stacks for quantized signals; typically accept integer token grids `(B, H, W, T)` along with optional dense embeddings and return `(B, H, W, T, Q)` logits. These are research models for spatio‑temporal AR with different factorisations (tri‑plane attention, coarse‑to‑fine 3‑D, etc.).
+
+### Tokenizers
+#### VideoGPTTokenizer
+VQ‑VAE for `(T, H, W)` sequences; accepts `(H, W, T)` or `(B, H, W, T)` and returns reconstruction plus VQ outputs (`encodings`, `embeddings`). Used to turn topomap videos into discrete token grids; decode returns `(B, H, W, T)`.
+#### Emu3VisionVQ
+Alternative video tokenizer (configurable embed/channels/codebook size) suitable for `(H, W, T)` inputs from `ChunkDatasetImage`; encode returns latent quantized codes and embeddings, decode reconstructs to `(B, H, W, T)`. Pair with VQ‑AR forecasters such as VQGPT2MEG.
+#### BrainOmniTokenizer
+Residual‑vector‑quantizer for raw MEG with multiple codebook stages; input is `(x, pos, ch_type)` and output includes latent tokens `(B, C_latent, T, Nq)` and optional reconstructions. Intended to be coupled with `BrainOmniForecast` but usable standalone for representation learning.
