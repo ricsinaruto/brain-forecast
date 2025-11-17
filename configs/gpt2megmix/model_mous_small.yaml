@@ -1,0 +1,23 @@
+num_channels: 273
+vocab_size: 256
+d_model: 546
+num_layers: 8  # 12
+channel_dropout_p: 0.0
+quant_emb: 2  # 8
+attn_type: standard
+mlp_type: standard
+
+embedding_args:
+  class_emb: 2
+  num_classes: 5
+
+attn_args:
+  d_model: 546
+  nheads: 6
+  dropout: 0.5
+  rope: true
+
+mlp_args:
+  d_model: 546
+  # num_experts: 8
+  # experts_per_token: 1

@@ -30,6 +30,7 @@ class Preprocessing(ABC):
         data_path: str,
         log_dir: Optional[str] = None,
         save_path: Optional[str] = None,
+        stage1_path: Optional[str] = None,
         osl_config: Optional[str] = None,
         preproc_config: Optional[dict[str, Any]] = None,
         n_workers: int = 1,
@@ -61,6 +62,7 @@ class Preprocessing(ABC):
         default_save_path = os.path.join(os.path.dirname(data_path), "preprocessed")
         self.save_folder = save_path if save_path is not None else default_save_path
         self.log_dir = log_dir if log_dir is not None else self.save_folder
+        self.stage1_path = stage1_path if stage1_path is not None else self.save_folder
 
         # Set extra_funcs for this class based on preproc_config
         self.extra_funcs = []
@@ -125,7 +127,7 @@ class Preprocessing(ABC):
             self.batch_args["files"] = files
             self.batch_args["subjects"] = subjects
 
-        print(f"INFO: Kept {num_kept} files out of {total_files}")
+            print(f"INFO: Kept {num_kept} files out of {total_files}")
 
         # Stage 1: Run OSL preprocessing pipeline
         print("Stage 1: Running OSL preprocessing pipeline...")
@@ -138,6 +140,7 @@ class Preprocessing(ABC):
             reportdir=reportdir,
             gen_report=True,
             dask_client=True,
+            overwrite=True,
         )
 
         client.close()
@@ -148,7 +151,7 @@ class Preprocessing(ABC):
         """
         print("\nStage 2: Applying custom processing pipeline...")
         for subject in self.batch_args["subjects"]:
-            subject_dir = os.path.join(self.save_folder, subject)
+            subject_dir = os.path.join(self.stage1_path, subject)
             fif_file = os.path.join(subject_dir, f"{subject}_preproc-raw.fif")
 
             if os.path.exists(fif_file):
@@ -208,6 +211,11 @@ class Preprocessing(ABC):
             "session": data["session"],
             "sfreq": data["sfreq"],
         }
+
+        # if event_array is in data, add it to raw_array as a new channel
+        if "event_array" in data:
+            event_array = data["event_array"].reshape(1, -1)
+            data["raw_array"] = np.concatenate([data["raw_array"], event_array], axis=0)
 
         chunk_len = int(data["sfreq"] * self.chunk_seconds)
         array = data["raw_array"]

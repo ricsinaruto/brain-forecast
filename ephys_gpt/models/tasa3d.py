@@ -21,6 +21,7 @@ class TASA3D(nn.Module):
         heads: int = 8,
         drop: float = 0.0,
         rope: bool = True,
+        n_cond_tok: int = 0,
     ):
         super().__init__()
         self.token = nn.Embedding(quant_levels, emb_dim)
@@ -41,13 +42,39 @@ class TASA3D(nn.Module):
         self.norm = nn.GroupNorm(1, emb_dim)
         self.head = nn.Conv3d(emb_dim, quant_levels, 1)  # categorical logits
 
+        self.n_cond_tok = n_cond_tok
+        if n_cond_tok > 0:
+            self.emb_tok = nn.Embedding(n_cond_tok, emb_dim)
+
+    def _apply_conditioning(self, x: torch.Tensor, cond: torch.Tensor):
+        """
+        Args:
+            x: [B,H,W,T,D]
+            cond: [B,1,1,T]
+        Returns:
+            [B,H,W,T,D]
+        """
+        B, H, W, T, D = x.shape
+
+        # expand cond to [B,H,W,T]
+        cond = cond.expand(-1, H, W, -1)  # B x H x W x T
+        cond = self.emb_tok(cond)
+        return x + cond
+
     def forward(
         self, x_tokens: torch.Tensor, embeds: torch.Tensor = None
     ) -> torch.Tensor:  # [B,H,W,T] ints
+        cond = None
+        if isinstance(x_tokens, tuple) or isinstance(x_tokens, list):
+            x_tokens, cond = x_tokens
+
         if embeds is None:
             x = self.token(x_tokens)  # [B,H,W,T,D]
         else:
             x = embeds
+
+        if cond is not None and self.n_cond_tok > 0:
+            x = self._apply_conditioning(x, cond)
 
         x = x.permute(0, 4, 3, 1, 2).contiguous()  # [B,D,T,H,W]
 

@@ -1,0 +1,15 @@
+num_channels: 273
+vocab_size: 256
+d_model: 64
+num_layers: 12
+quant_emb: 64
+
+n_cond_tok: 5
+d_tok_emb: 16
+d_glob_emb: 64
+
+attn_type: conditioned
+attn_args:
+  nheads: 8
+  dropout: 0.0
+  rope: true

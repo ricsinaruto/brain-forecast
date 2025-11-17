@@ -39,4 +39,4 @@ eval:
   num_channels: 272
   temperature: 1.0
   top_p: 0.8
-  ckpt_path: /vol/data/trainings/wavenet3d/lightning_logs/version_14/checkpoints/epoch=1-step=474.ckpt
+  ckpt_path: /vol/data/trainings/wavenet3d/lightning_logs/version_36/checkpoints/epoch=96-step=25511.ckpt

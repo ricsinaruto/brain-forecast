@@ -5,7 +5,7 @@
 # Augmentations are optional and can be enabled by setting parameters
 
 # Separate model configuration file
-model_config: configs/models/gpt2meg.yaml
+model_config: configs/gpt2meg/model.yaml
 augmentations: configs/augmentations.yaml
 
 save_dir: /vol/data/trainings/gpt2meg
@@ -15,33 +15,45 @@ model_name: GPT2MEG
 loss_name: CrossEntropy
 
 datasplitter:
-  dataset_root: "/vol/data/datasets/Omega/preprocessed"
+  dataset_class: ChunkDatasetJIT
+  dataset_root: "/vol/data/datasets/Omega/preprocessed_cont"
   example_seconds: 2
   overlap_seconds: 1
   val_ratio: 0.1
   test_ratio: 0.1
+  dataset_kwargs:
+    quant_levels: 512
+    max_val: 5.0
 
 dataloader:
-  batch_size: 8
-  num_workers: 8
+  batch_size: 4
+  num_workers: 16
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
 
 loss:
-  label_smoothing: 0.1
+  label_smoothing: 0.0
   l1: 0.0
 
 lightning:
-  lr: 0.001
-  weight_decay: 0.01
+  lr: 1.0e-4
+  weight_decay: 0.0
   compile: true
+  log_samples: false
+  log_psd: False
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-6
+    T_max: 50
 
 trainer:
-  max_epochs: 100
+  max_epochs: 50
   accelerator: cuda
   profiler: null
   fast_dev_run: false
   check_val_every_n_epoch: 1
-  log_every_n_steps: 50
+  log_every_n_steps: 10
   precision: 16-mixed
+  gradient_clip_val: 1.0

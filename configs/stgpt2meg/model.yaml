@@ -1,21 +1,20 @@
-num_channels: 272
+num_channels: 274
 vocab_size: 256
-d_model: 32
-layers: 4
-trf_block: STGPTBlockParallel
+d_model: 256
+layers: 8
+trf_block: STGPTBlock  # STGPTBlock, STGPTBlockParallel, STBlock
 
 trf_args:
-  layers: 4
-  num_experts: 16
-  experts_per_token: 2
-  intermediate_size: 32
-  swiglu_limit: 7.0
-  head_dim: 16
-  num_attention_heads: 4
-  num_key_value_heads: 4
-  sliding_window: 0
-  initial_context_length: 1024
-  rope_theta: 150000.0
-  rope_scaling_factor: 32.0
-  rope_ntk_alpha: 1.0
-  rope_ntk_beta: 32.0
+  attn_type: standard
+  mlp_type: standard
+
+  attn_args:
+    d_model: 256
+    nheads: 8
+    dropout: 0.0
+    rope: true
+
+  mlp_args:
+    d_model: 256
+    # num_experts: 4
+    # experts_per_token: 2

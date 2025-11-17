@@ -1,8 +1,9 @@
 # chronoflow_ssm.py
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Tuple
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -32,8 +33,8 @@ def numel_except_batch(x):
 # Logit transform for continuous images in [0,1]
 def dequantize_and_logit(x, alpha=1e-6):
     # uniform dequantization + logit
-    if x.dtype != torch.float32:
-        x = x.float()
+    # if x.dtype != torch.float32:
+    #    x = x.float()
     x = x.clamp(0.0, 1.0)
     x = (x * (1 - 2 * alpha)) + alpha
     y = torch.log(x) - torch.log(1 - x)
@@ -75,9 +76,30 @@ class ChronoFlowConfig:
 
 
 class ChronoFlowSSM(nn.Module):
-    def __init__(self, cfg: ChronoFlowConfig):
+    def __init__(self, cfg: ChronoFlowConfig | None = None, **kwargs):
         super().__init__()
-        self.cfg = cfg
+        if cfg is not None and not isinstance(cfg, ChronoFlowConfig):
+            if isinstance(cfg, Mapping):
+                if kwargs:
+                    cfg_kwargs = dict(cfg)
+                    cfg_kwargs.update(kwargs)
+                    kwargs = cfg_kwargs
+                    cfg = None
+                else:
+                    kwargs = dict(cfg)
+                    cfg = None
+            else:
+                raise TypeError(
+                    "cfg must be a ChronoFlowConfig, mapping of kwargs, or None."
+                )
+
+        if cfg is not None:
+            if kwargs:
+                cfg = replace(cfg, **kwargs)
+            self.cfg = cfg
+        else:
+            self.cfg = ChronoFlowConfig(**kwargs)
+        cfg = self.cfg
         H, W = cfg.image_size
 
         # Spatial flow g_theta
@@ -116,6 +138,49 @@ class ChronoFlowSSM(nn.Module):
             cond_dim=cfg.cond_dim,
         )
 
+        self.rollout_prob = cfg.rollout_prob
+        self.step_counter = 0
+
+    def forward(
+        self,
+        x: torch.Tensor | Tuple[torch.Tensor, ...],
+        *,
+        return_stats: bool = True,
+    ) -> dict:
+        """Compute negative log-likelihood for a batch of sequences.
+
+        Args:
+            x: Tensor (or tuple/list of tensors) describing the observed frames.
+               Accepted layouts are documented in :meth:`_prepare_sequence`.
+            return_stats: Whether to include auxiliary statistics (bits/dim,
+                boundary probability) in the output dictionary.
+
+        Returns:
+            dict containing:
+              ``nll``: mean negative log-likelihood over the batch (Tensor)
+              ``stats``: optional dictionary of auxiliary metrics
+        """
+        self.step_counter += 1
+
+        if self.step_counter > 100:
+            self.rollout_prob = 0.05
+        # if self.step_counter > 200:
+        #    self.rollout_prob = 0.1
+
+        nll, stats = self.nll_sequence(x)
+
+        output: dict[str, torch.Tensor | dict] = {"nll": nll}
+        if return_stats:
+            stats_tensor = {
+                "bits_per_dim": stats["bits_per_dim"],
+                "avg_boundary": torch.as_tensor(
+                    stats["avg_boundary"], device=nll.device, dtype=nll.dtype
+                ),
+            }
+            output["stats"] = stats_tensor
+
+        return output
+
     # ----- Framewise encode/decode -----
     def encode_frame(self, x):
         # x in logit space already
@@ -150,9 +215,8 @@ class ChronoFlowSSM(nn.Module):
         # Temporal states
         states = self.temporal.init_state(B, device)
         total_logprob = torch.zeros(B, device=device)
-
-        # Rollout augmentation toggles
-        rollout_prob = self.cfg.rollout_prob
+        boundary_sum = torch.zeros((), device=device)
+        boundary_count = 0
 
         u_prev_for_state = None
         for t in range(T):
@@ -168,8 +232,11 @@ class ChronoFlowSSM(nn.Module):
             # 4) accumulate: log p(x_t | x_<t) = log p(u_t | s_t) + log |det dg/dx|
             total_logprob = total_logprob + logp_u + ldj_g + logdet_pre[:, t]
 
+            boundary_sum = boundary_sum + boundary.mean()
+            boundary_count += 1
+
             # 5) teacher-forced state input for next step (with rollout aug)
-            if (t < T - 1) and (random.random() < rollout_prob):
+            if (t < T - 1) and (random.random() < self.rollout_prob):
                 # sample u_hat ~ p(u | cond) to self-condition
                 u_hat = self.h.sample(self.u_shape_with_batch(B, device), cond)
                 u_prev_for_state = u_hat.detach()
@@ -177,9 +244,12 @@ class ChronoFlowSSM(nn.Module):
                 u_prev_for_state = u_t.detach()
 
         nll = -(total_logprob.mean())
+        avg_boundary = (
+            (boundary_sum / boundary_count) if boundary_count > 0 else float("nan")
+        )
         stats = dict(
             bits_per_dim=nll / (math.log(2) * C * H * W),
-            avg_boundary=boundary.mean().item(),
+            avg_boundary=avg_boundary,
         )
         return nll, stats
 
@@ -188,23 +258,32 @@ class ChronoFlowSSM(nn.Module):
         return (B, C, H, W)
 
     # ----- Sampling / forecasting -----
+    @torch.inference_mode()
+    def forecast(self, x_context, steps: int):
+        self.eval()
+        return self.sample(x_context, steps)
+
     def sample(self, x_context, steps: int):
         """
         x_context: [B, T0, C, H, W] in [0,1]
         Returns: samples [B, T0+steps, C, H, W] in [0,1]
         """
-        self.eval()
         B, T0, C, H, W = x_context.shape
         device = x_context.device
 
-        # preprocess context
-        x_logit = []
+        generated = None
+
+        # preprocess context in logit space
+        x_logit_frames = []
         for t in range(T0):
             y, _ = dequantize_and_logit(x_context[:, t], alpha=self.cfg.alpha_logit)
-            x_logit.append(y)
-        x_logit = torch.stack(x_logit, dim=1)
+            x_logit_frames.append(y)
+        if T0 > 0:
+            x_logit = torch.stack(x_logit_frames, dim=1)
+        else:
+            x_logit = x_context.new_empty((B, 0, C, H, W))
 
-        # init states via teacher forcing over context
+        # initialise temporal state by teacher forcing the context
         states = self.temporal.init_state(B, device)
         u_prev = None
         for t in range(T0):
@@ -212,19 +291,25 @@ class ChronoFlowSSM(nn.Module):
             u_t, _ = self.encode_frame(x_logit[:, t])
             u_prev = u_t
 
-        # now autoregressive generation
-        frames_out = [x_context[:, t] for t in range(T0)]
+        frames_out = list(x_context.unbind(dim=1))
+
+        # autoregressive rollout
         for k in range(steps):
             step_idx = T0 + k
             cond, states, _ = self.temporal(states, u_prev, step_idx=step_idx)
             u_sample = self.h.sample(self.u_shape_with_batch(B, device), cond)
             x_logit_sample, _ = self.decode_frame(u_sample)
-            # inverse logit -> [0,1]
             x_sample, _ = logit_inverse(x_logit_sample)
+
+            if not torch.isfinite(x_sample).all():
+                print("Warning: non-finite sample")
+
             frames_out.append(x_sample.clamp(0, 1))
             u_prev = u_sample
 
-        return torch.stack(frames_out, dim=1)
+        generated = torch.stack(frames_out, dim=1)
+
+        return generated
 
 
 # -------------------------

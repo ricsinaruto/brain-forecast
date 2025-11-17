@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 from einops import rearrange
 import torch.nn.functional as F
+import numpy as np
 
 from .attention import AttentionBlock, MultiHeadAttention, MultiHeadAttentionGPTOSS
 from .transformer_blocks import MLP, MLPMoE
@@ -148,7 +149,6 @@ class Conv3dBlock(nn.Module):
         kH: int,
         kW: int,
         image_size: int,
-        conv_groups: int,
         dropout: float,
         row_idx: torch.Tensor | None = None,
         col_idx: torch.Tensor | None = None,
@@ -160,6 +160,11 @@ class Conv3dBlock(nn.Module):
         self.kH = kH
         self.kW = kW
 
+        # if row and col idx is none, load from tmp file
+        tensors = np.load("tmp/img_inds.npy", allow_pickle=True).item()
+        row_idx = torch.from_numpy(tensors["row_idx"])
+        col_idx = torch.from_numpy(tensors["col_idx"])
+
         assert row_idx.shape == col_idx.shape
         self.register_buffer("row_idx", row_idx.long())
         self.register_buffer("col_idx", col_idx.long())
@@ -170,11 +175,10 @@ class Conv3dBlock(nn.Module):
             kernel_size=(kT, kH, kW),
             stride=1,
             padding=0,  # we will pad manually to enforce causal time
-            groups=conv_groups,
             bias=True,
         )
         self.pw = nn.Conv3d(d_model, d_model, kernel_size=1, bias=True)
-        self.bn = nn.BatchNorm3d(d_model)
+        self.gn = nn.GroupNorm(d_model // 8, d_model)
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout)
 
@@ -215,7 +219,7 @@ class Conv3dBlock(nn.Module):
         # F.pad order for 5D: (W_left, W_right, H_top, H_bottom, D_front, D_back)
         y = F.pad(x, (pad_w, pad_w, pad_h, pad_h, pad_t, 0))
         y = self.conv3d(y)
-        y = self.bn(y)
+        y = self.gn(y)
         y = self.act(y)
         y = self.pw(y)
         y = self.drop(y)
@@ -230,12 +234,11 @@ class STConvBlock(STGPTBlock):
         attn_args: dict,
         mlp_args: dict,
         attn_type: str = "standard",
-        mlp_type: str = "moe",
+        mlp_type: str = "standard",
         image_size: int = 32,
         row_idx: torch.Tensor | None = None,
         col_idx: torch.Tensor | None = None,
         conv_kernel: tuple[int, int, int] = (3, 3, 3),
-        conv_groups: int | None = None,
         dropout: float = 0.0,
     ):
         """
@@ -261,11 +264,9 @@ class STConvBlock(STGPTBlock):
         d_model = attn_args["d_model"]
         kT, kH, kW = conv_kernel
         self.kT, self.kH, self.kW = kT, kH, kW
-        if conv_groups is None:
-            conv_groups = d_model  # depthwise over feature channels
 
         self.cb1 = Conv3dBlock(
-            d_model, kT, kH, kW, image_size, conv_groups, dropout, row_idx, col_idx
+            d_model, kT, kH, kW, image_size, dropout, row_idx, col_idx
         )
         # self.cb2 = Conv3dBlock(
         #    d_model, kT, kH, kW, image_size, conv_groups, dropout, row_idx, col_idx
@@ -439,6 +440,8 @@ class TASA3DBlock(nn.Module):
             [UpStage(C_list[i], C_list[i - 1]) for i in range(num_down, 0, -1)]
         )
 
+        # print(f"Attn dim: {self.D_attn}")
+
         # Temporal attention at bottleneck (works directly on flattened h)
         self.attn = MultiHeadAttention(
             d_model=self.D_attn, nheads=heads, rope=rope, dropout=drop
@@ -480,7 +483,7 @@ class TASA3DBlock(nn.Module):
         tokens = h.permute(0, 2, 1, 3, 4).contiguous().view(B, T, self.D_attn)
 
         # Temporal-only transformer block
-        z = tokens + self.attn(tokens)
+        z = tokens + self.attn(tokens, tokens, tokens, causal=True)
         z = z + self.token_ffn(z)
 
         # Unflatten back to bottleneck map

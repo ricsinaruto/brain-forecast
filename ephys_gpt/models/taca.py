@@ -53,8 +53,8 @@ class AxialAttentionBlock(nn.Module):
     def __init__(self, dim, heads=8, dropout=0.0):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.row_attn = MultiHeadAttention(dim, heads, dropout)
-        self.col_attn = MultiHeadAttention(dim, heads, dropout)
+        self.row_attn = MultiHeadAttention(dim, heads, dropout=dropout)
+        self.col_attn = MultiHeadAttention(dim, heads, dropout=dropout)
         self.ff = FeedForward(dim, mult=4, dropout=dropout)
 
     def forward(self, x):  # [B,H,W,D]
@@ -150,7 +150,7 @@ class DecoderVectorized(nn.Module):
         self.query_grid = nn.Parameter(torch.randn(self.Nq, dim) * 0.02)
         self.t_pos = nn.Embedding(max_T, dim)
         nn.init.normal_(self.t_pos.weight, std=0.02)
-        self.cross = MultiHeadAttention(dim, heads, dropout)
+        self.cross = MultiHeadAttention(dim, heads, dropout=dropout)
         self.refine = (
             AxialAttentionBlock(dim, heads, dropout) if refine else nn.Identity()
         )
@@ -200,7 +200,7 @@ class DecoderVectorized(nn.Module):
         y = self.refine(y)  # [B*(T-1),H,W,D]
 
         # --- Per-pixel 256-way logits ---
-        logits = self.head(y.view(B * (T - 1) * self.H * self.W, D)).view(
+        logits = self.head(y.reshape(B * (T - 1) * self.H * self.W, D)).reshape(
             B, T - 1, self.H, self.W, 256
         )
         return logits

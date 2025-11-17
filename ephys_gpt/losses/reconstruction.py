@@ -36,6 +36,54 @@ class NLL(nn.Module):
         return nll + logdet
 
 
+class ChronoFlowLoss(nn.Module):
+    """Wrapper around ChronoFlowSSM outputs for Lightning training.
+
+    Expects the model forward pass to return a dictionary with at least the
+    key ``"nll"`` and optionally a ``"stats"`` sub-dictionary containing
+    ``"bits_per_dim"`` and ``"avg_boundary"`` tensors.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.metrics: dict[str, Any] = {
+            "bits_per_dim": self._bits_per_dim,
+            "avg_boundary": self._avg_boundary,
+        }
+
+    def forward(
+        self,
+        outputs: dict[str, Any],
+        targets: Tensor | tuple | None,
+        **kwargs,
+    ) -> Tensor:
+        if not isinstance(outputs, dict) or "nll" not in outputs:
+            raise ValueError(
+                "ChronoFlowLoss expects the model to return a dict with an 'nll' key."
+            )
+        return outputs["nll"]
+
+    @staticmethod
+    def _bits_per_dim(outputs: dict[str, Any], *_) -> Tensor:
+        stats = outputs.get("stats", {})
+        val = stats.get("bits_per_dim")
+        if val is None:
+            return torch.tensor(float("nan"), device=outputs["nll"].device)
+        return val.detach() if isinstance(val, torch.Tensor) else torch.as_tensor(
+            val, device=outputs["nll"].device
+        )
+
+    @staticmethod
+    def _avg_boundary(outputs: dict[str, Any], *_) -> Tensor:
+        stats = outputs.get("stats", {})
+        val = stats.get("avg_boundary")
+        if val is None:
+            return torch.tensor(float("nan"), device=outputs["nll"].device)
+        return val.detach() if isinstance(val, torch.Tensor) else torch.as_tensor(
+            val, device=outputs["nll"].device
+        )
+
+
 class VQVAELoss(nn.Module):
     def __init__(self):
         super().__init__()

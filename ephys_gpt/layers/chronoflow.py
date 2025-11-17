@@ -34,8 +34,8 @@ class ActNorm2d(nn.Module):
         # x: [B,C,H,W]
         mean = x.mean(dim=[0, 2, 3], keepdim=True)
         var = x.var(dim=[0, 2, 3], unbiased=False, keepdim=True)
-        self.bias.data = -mean
-        self.log_scale.data = -0.5 * torch.log(var + self.eps)
+        self.bias.data = -mean.to(self.bias.dtype)
+        self.log_scale.data = -0.5 * torch.log(var + self.eps).to(self.log_scale.dtype)
         self.initialized = True
 
     def forward(self, x, reverse=False):
@@ -64,7 +64,7 @@ class Invertible1x1Conv2d(nn.Module):
     def forward(self, x, reverse=False):
         B, C, H, W = x.shape
         if reverse:
-            W_inv = torch.inverse(self.weight.double()).float()
+            W_inv = torch.inverse(self.weight.contiguous())
             y = F.conv2d(x, W_inv.view(C, C, 1, 1))
             ldj = -(H * W) * torch.slogdet(self.weight)[1].repeat(B)
         else:

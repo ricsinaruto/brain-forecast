@@ -3,19 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from ..layers.attention import sdpa, sdpa_math
+from ..layers.attention import MultiHeadAttention
 from ..layers.embeddings import rope_inv_freq, apply_rope_1d
-
-
-def split_heads(x, heads):  # [B,C,T,H,W] -> [B,h,d,T,H,W]
-    B, C, T, H, W = x.shape
-    d = C // heads
-    return x.view(B, heads, d, T, H, W)
-
-
-def merge_heads(x):  # [B,h,d,T,H,W] -> [B,C,T,H,W]
-    B, h, d, T, H, W = x.shape
-    return x.view(B, h * d, T, H, W)
 
 
 class CausalDWConv3d(nn.Module):
@@ -138,6 +127,22 @@ class CK3DAttention(nn.Module):
         assert channels % heads == 0
         self.channels = channels
         self.heads = heads
+        self.head_dim = channels // heads
+        self.axis_attn = nn.ModuleDict(
+            {
+                axis: MultiHeadAttention(
+                    channels,
+                    heads,
+                    dropout=0.0,
+                    bias=False,
+                    rope=False,
+                    skip_input_proj=True,
+                )
+                for axis in ("t", "h", "w")
+            }
+        )
+        for attn in self.axis_attn.values():
+            attn.out_proj = nn.Identity()
         self.qkv = nn.Conv3d(channels, 3 * channels, 1, bias=False)
         self.bank = ConvKernelBank(channels, M=kernel_bank_M)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -159,69 +164,69 @@ class CK3DAttention(nn.Module):
             "inv_freq_w", rope_inv_freq(d_rot, rope_base_w), persistent=False
         )
 
+    def _apply_rope_axis(
+        self, q_seq: torch.Tensor, k_seq: torch.Tensor, inv_freq: torch.Tensor, length: int
+    ):
+        if not (self.use_rope and inv_freq.numel() > 0):
+            return q_seq, k_seq
+        B = q_seq.shape[0]
+        q_heads = (
+            q_seq.contiguous()
+            .view(B, length, self.heads, self.head_dim)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        k_heads = (
+            k_seq.contiguous()
+            .view(B, length, self.heads, self.head_dim)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        q_heads, k_heads = apply_rope_1d(q_heads, k_heads, inv_freq, 0, L=length)
+        q_seq = q_heads.permute(0, 2, 1, 3).reshape(B, length, -1)
+        k_seq = k_heads.permute(0, 2, 1, 3).reshape(B, length, -1)
+        return q_seq, k_seq
+
     def _attend_axis(self, q, k, v, axis: str, causal: bool):
-        """
-        q,k,v: [B, heads, d, T, H, W] -> returns [B, heads, d, T, H, W]
-        """
-        B, Hh, d, T, H, W = q.shape
+        B, C, T, H, W = q.shape
 
         if axis == "t":
-            qx = q.permute(0, 4, 5, 1, 3, 2).contiguous()
-            qx = qx.view(B * H * W, Hh, T, d).contiguous()
-            kx = k.permute(0, 4, 5, 1, 3, 2).contiguous()
-            kx = kx.view(B * H * W, Hh, T, d).contiguous()
-            vx = v.permute(0, 4, 5, 1, 3, 2).contiguous()
-            vx = vx.view(B * H * W, Hh, T, d).contiguous()
-            if self.use_rope and self.inv_freq_t.numel() > 0:
-                qx, kx = apply_rope_1d(qx, kx, self.inv_freq_t, 0, L=T)
-            out = sdpa(qx, kx, vx, causal=causal)
-            out = out.view(B, H, W, Hh, T, d).permute(0, 3, 5, 4, 1, 2).contiguous()
-            return out
+            q_seq = q.permute(0, 3, 4, 2, 1).contiguous().view(B * H * W, T, C)
+            k_seq = k.permute(0, 3, 4, 2, 1).contiguous().view(B * H * W, T, C)
+            v_seq = v.permute(0, 3, 4, 2, 1).contiguous().view(B * H * W, T, C)
+            q_seq, k_seq = self._apply_rope_axis(q_seq, k_seq, self.inv_freq_t, T)
+            ctx_seq = self.axis_attn[axis](q_seq, k_seq, v_seq, causal=causal)
+            ctx = ctx_seq.view(B, H, W, T, C).permute(0, 4, 3, 1, 2).contiguous()
+            return ctx
 
-        elif axis == "h":
-            qx = q.permute(0, 3, 5, 1, 4, 2).contiguous()
-            qx = qx.view(B * T * W, Hh, H, d).contiguous()
-            kx = k.permute(0, 3, 5, 1, 4, 2).contiguous()
-            kx = kx.view(B * T * W, Hh, H, d).contiguous()
-            vx = v.permute(0, 3, 5, 1, 4, 2).contiguous()
-            vx = vx.view(B * T * W, Hh, H, d).contiguous()
-            if self.use_rope and self.inv_freq_h.numel() > 0:
-                qx, kx = apply_rope_1d(qx, kx, self.inv_freq_h, 0, L=H)
-            out = sdpa_math(qx, kx, vx)
-            out = out.view(B, T, W, Hh, H, d).permute(0, 3, 5, 1, 4, 2).contiguous()
-            return out
+        if axis == "h":
+            q_seq = q.permute(0, 2, 4, 3, 1).contiguous().view(B * T * W, H, C)
+            k_seq = k.permute(0, 2, 4, 3, 1).contiguous().view(B * T * W, H, C)
+            v_seq = v.permute(0, 2, 4, 3, 1).contiguous().view(B * T * W, H, C)
+            q_seq, k_seq = self._apply_rope_axis(q_seq, k_seq, self.inv_freq_h, H)
+            ctx_seq = self.axis_attn[axis](q_seq, k_seq, v_seq, causal=causal)
+            ctx = ctx_seq.view(B, T, W, H, C).permute(0, 4, 1, 3, 2).contiguous()
+            return ctx
 
-        elif axis == "w":
-            qx = q.permute(0, 3, 4, 1, 5, 2).contiguous()
-            qx = qx.view(B * T * H, Hh, W, d).contiguous()
-            kx = k.permute(0, 3, 4, 1, 5, 2).contiguous()
-            kx = kx.view(B * T * H, Hh, W, d).contiguous()
-            vx = v.permute(0, 3, 4, 1, 5, 2).contiguous()
-            vx = vx.view(B * T * H, Hh, W, d).contiguous()
-            if self.use_rope and self.inv_freq_w.numel() > 0:
-                qx, kx = apply_rope_1d(qx, kx, self.inv_freq_w, 0, L=W)
-            out = sdpa_math(qx, kx, vx)
-            out = out.view(B, T, H, Hh, W, d).permute(0, 3, 5, 1, 2, 4).contiguous()
-            return out
-        else:
-            raise ValueError("axis ∈ {t,h,w}")
+        if axis == "w":
+            q_seq = q.permute(0, 2, 3, 4, 1).contiguous().view(B * T * H, W, C)
+            k_seq = k.permute(0, 2, 3, 4, 1).contiguous().view(B * T * H, W, C)
+            v_seq = v.permute(0, 2, 3, 4, 1).contiguous().view(B * T * H, W, C)
+            q_seq, k_seq = self._apply_rope_axis(q_seq, k_seq, self.inv_freq_w, W)
+            ctx_seq = self.axis_attn[axis](q_seq, k_seq, v_seq, causal=causal)
+            ctx = ctx_seq.view(B, T, H, W, C).permute(0, 4, 1, 2, 3).contiguous()
+            return ctx
+
+        raise ValueError("axis ∈ {t,h,w}")
 
     def forward(self, x):  # [B,C,T,H,W]
         qkv = self.qkv(x)
         q, k, v = torch.chunk(qkv, 3, dim=1)
         k, v = self.bank(q, k, v)
 
-        q = split_heads(q, self.heads)
-        k = split_heads(k, self.heads)
-        v = split_heads(v, self.heads)
-
         ctx_t = self._attend_axis(q, k, v, "t", causal=True)
         ctx_h = self._attend_axis(q, k, v, "h", causal=False)
         ctx_w = self._attend_axis(q, k, v, "w", causal=False)
-
-        ctx_t = merge_heads(ctx_t)
-        ctx_h = merge_heads(ctx_h)
-        ctx_w = merge_heads(ctx_w)
 
         gt, gh, gw = torch.chunk(torch.sigmoid(self.gate(x)), 3, dim=1)
         y = gt * ctx_t + gh * ctx_h + gw * ctx_w

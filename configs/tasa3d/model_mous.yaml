@@ -1,0 +1,8 @@
+input_hw: [32, 32]
+emb_dim: 24  # embedding dim; d_model will be emb_dim * 2**num_down * spatial tokens
+depth: 16  # number of TASA3DBlock
+num_down: 3  # reduce spatial size by 2^num_down
+channel_grow: 2  # multiply channels by channel_grow each downstage
+heads: 24
+drop: 0.0
+rope: true

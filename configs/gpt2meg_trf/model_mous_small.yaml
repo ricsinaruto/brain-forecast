@@ -1,0 +1,17 @@
+num_channels: 273
+vocab_size: 256
+d_model: 64
+num_layers: 12
+quant_emb: 64
+attn_type: standard
+mlp_type: standard
+
+embedding_args:
+  channel_emb: 64
+  class_emb: 64
+  num_classes: 5
+
+attn_args:
+  nheads: 8
+  dropout: 0.0
+  rope: true

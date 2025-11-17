@@ -1,0 +1,42 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/chronoflow/model.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/chronoflow
+resume_from: null
+
+model_name: ChronoFlowSSM
+loss_name: ChronoFlowLoss
+eval_class: EvalFlow
+
+datasplitter:
+  dataset_class: ChunkDatasetImage01
+  dataset_root: /vol/data/datasets/Omega/preprocessed
+  example_seconds: 0.5
+  overlap_seconds: 0.25
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 64
+  num_workers: 0
+  prefetch_factor: null
+  pin_memory: true
+  persistent_workers: false
+
+eval:
+  accelerator: cuda
+  future_steps: 10
+  gen_seconds: 1
+  gen_sampling: top_p
+  channel_shape: [272]
+  num_channels: 272
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/chronoflow/lightning_logs/version_29/checkpoints/last-checkpoint.ckpt

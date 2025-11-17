@@ -1,20 +1,27 @@
+import json
 import os
 import random
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from tqdm import tqdm
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
 import numpy as np
-
-from pnpl.datasets import LibriBrainPhoneme
-
 
 from .datasets import (
     ChunkDataset,
-    ChunkDatasetReconstruction,
     ChunkDatasetForecastCont,
     ChunkDatasetImage,
+    ChunkDatasetImage01,
     ChunkDatasetImageQuantized,
-    GroupedDatasetAugmented,
-    RandomLabelGroupedDataset,
+    ChunkDatasetJIT,
+    ChunkDatasetReconstruction,
+    ChunkDatasetMous,
+    ChunkDatasetMasked,
+    ChunkDatasetSubset,
+    ChunkDatasetCondition,
+    ChunkDatasetImageQuantizedCondition,
+    ChunkDatasetImageCondition,
 )
 
 DATASET_CLASSES = {
@@ -23,8 +30,14 @@ DATASET_CLASSES = {
     "ChunkDatasetForecastCont": ChunkDatasetForecastCont,
     "ChunkDatasetImage": ChunkDatasetImage,
     "ChunkDatasetImageQuantized": ChunkDatasetImageQuantized,
-    "GroupedDatasetAugmented": GroupedDatasetAugmented,
-    "RandomLabelGroupedDataset": RandomLabelGroupedDataset,
+    "ChunkDatasetJIT": ChunkDatasetJIT,
+    "ChunkDatasetImage01": ChunkDatasetImage01,
+    "ChunkDatasetMous": ChunkDatasetMous,
+    "ChunkDatasetMasked": ChunkDatasetMasked,
+    "ChunkDatasetSubset": ChunkDatasetSubset,
+    "ChunkDatasetCondition": ChunkDatasetCondition,
+    "ChunkDatasetImageQuantizedCondition": ChunkDatasetImageQuantizedCondition,
+    "ChunkDatasetImageCondition": ChunkDatasetImageCondition,
 }
 
 
@@ -35,182 +48,581 @@ class Split:
     test: ChunkDataset
 
 
-def build_indices(
-    session_dir: str, example_len: int, overlap: int
-) -> List[Tuple[str, int, int]]:
-    """
-    Build indices for the dataset.
+@dataclass(frozen=True)
+class WindowSpec:
+    """Describes a fixed-length window inside a chunked MEG recording."""
 
-    Args:
-        session_dir: Directory containing the sessions
-        example_len: Length of the example
-        overlap: Overlap between examples
+    dataset: str
+    session: str
+    chunk: str
+    start: int
 
-    Returns:
-        List of tuples containing the session, chunk index,
-        and start index of the example
-        example_len_samples: Length of the example in samples
-        overlap_samples: Overlap between examples in samples
-    """
-    indices: List[Tuple[str, int, int]] = []
+
+@dataclass
+class SessionChannels:
+    """Channel mapping for a single session relative to the canonical layout."""
+
+    indices: np.ndarray  # maps session channel order → canonical order
+
+
+@dataclass
+class ChannelEntry:
+    """Aggregated information about a canonical channel across datasets."""
+
+    pos_sum: np.ndarray
+    count: int
+    ch_type: Union[int, str]
+    names: set[str] = field(default_factory=set)
+
+    def update(self, pos: np.ndarray, name: str) -> None:
+        self.pos_sum += pos
+        self.count += 1
+        self.names.add(name)
+
+    @property
+    def mean_pos(self) -> np.ndarray:
+        return (self.pos_sum / max(self.count, 1)).astype(np.float32)
+
+    @property
+    def canonical_name(self) -> str:
+        if not self.names:
+            return "unknown"
+        return sorted(self.names)[0]
+
+
+@dataclass
+class ChannelLayout:
+    """Canonical channel ordering shared across all datasets."""
+
+    names: List[str]
+    types: List[Union[int, str]]
+    pos_2d: np.ndarray
+
+    def as_numpy_types(self) -> np.ndarray:
+        return np.array(self.types)
+
+
+@dataclass
+class PreparedDatasets:
+    """Result of scanning dataset roots prior to splitting."""
+
+    indices: List[WindowSpec]
+    layout: ChannelLayout
+    session_channels: Dict[Tuple[str, str], SessionChannels]
+    dataset_roots: Dict[str, str]
+    window_size: int
+    overlap: int
+    sfreq: float
+    sessions_per_dataset: Dict[str, List[str]]
+
+
+@dataclass
+class SessionMetadata:
+    chunk_files: List[str]
+    chunk_length: int
+    last_chunk_length: int
+    ch_names: List[str]
+    pos_2d: np.ndarray
+    ch_types: Optional[List[Union[int, str]]]
+    sfreq: float
+
+
+def _normalise_roots(
+    dataset_root: Union[str, Sequence[str], Mapping[str, str]],
+) -> Dict[str, str]:
+    if isinstance(dataset_root, str):
+        return {"dataset0": dataset_root}
+
+    if isinstance(dataset_root, Mapping):
+        return {str(key): str(value) for key, value in dataset_root.items()}
+
+    if isinstance(dataset_root, Sequence):
+        normalised: Dict[str, str] = {}
+        for idx, root in enumerate(dataset_root):
+            key_base = Path(root).name or f"dataset{idx}"
+            key = key_base
+            # Guarantee unique keys when directory names collide
+            suffix = 1
+            while key in normalised:
+                key = f"{key_base}_{suffix}"
+                suffix += 1
+            normalised[key] = str(root)
+        return normalised
+
+    raise TypeError(
+        "dataset_root must be a string, sequence of strings, or mapping of name → path"
+    )
+
+
+def _list_sessions(root_dir: str) -> List[str]:
+    root_path = Path(root_dir)
+    if not root_path.exists():
+        raise FileNotFoundError(f"Dataset root does not exist: {root_dir}")
+
     sessions = [
-        d
-        for d in os.listdir(session_dir)
-        if os.path.isdir(os.path.join(session_dir, d))
+        entry.name
+        for entry in root_path.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".")
     ]
+    sessions.sort()
+    return sessions
 
-    ch_names = []
-    pos_2d = []
-    for session in sessions:
-        chunk_files = [
-            f
-            for f in os.listdir(os.path.join(session_dir, session))
-            if f.endswith(".npy")
-        ]
-        for f in chunk_files:
-            chunk_idx = int(os.path.splitext(f)[0])
-            data_dict = np.load(
-                os.path.join(session_dir, session, f), allow_pickle=True
-            ).item()
-            arr = data_dict["data"]
-            length = arr.shape[1]
-            sfreq = data_dict["sfreq"]
 
-            if len(data_dict["ch_names"]) > len(ch_names):
-                ch_names = data_dict["ch_names"]
-            if len(data_dict["pos_2d"]) > len(pos_2d):
-                pos_2d = data_dict["pos_2d"]
+def _chunk_sort_key(filename: str) -> Tuple[int, Union[int, str]]:
+    stem = Path(filename).stem
+    if stem.isdigit():
+        return 0, int(stem)
+    return 1, stem
 
-            example_len_samples = int(example_len * sfreq)
-            overlap_samples = int(overlap * sfreq)
 
-            for start in range(
-                0,
-                length - example_len_samples + 1,
-                example_len_samples - overlap_samples,
-            ):
-                indices.append((session, chunk_idx, start))
-    return indices, example_len_samples, overlap_samples, ch_names, pos_2d, sfreq
+def _list_chunk_files(session_path: Path) -> List[str]:
+    files = [f.name for f in session_path.iterdir() if f.suffix == ".npy"]
+    files.sort(key=_chunk_sort_key)
+    return files
+
+
+def _load_chunk(path: Path) -> dict:
+    return np.load(path, allow_pickle=True).item()
+
+
+def _cache_file(cache_dir: Path, dataset_key: str) -> Path:
+    safe_key = dataset_key.replace(os.sep, "_")
+    return cache_dir / f"{safe_key}_index.json"
+
+
+def _load_dataset_cache(
+    cache_dir: Optional[Path], dataset_key: str
+) -> Dict[str, Dict[str, object]]:
+    if cache_dir is None:
+        return {}
+    cache_path = _cache_file(cache_dir, dataset_key)
+    if not cache_path.exists():
+        return {}
+    try:
+        with cache_path.open("r", encoding="utf-8") as handle:
+            raw: Dict[str, Dict[str, object]] = json.load(handle)
+    except Exception:
+        return {}
+    return raw
+
+
+def _save_dataset_cache(
+    cache_dir: Optional[Path], dataset_key: str, data: Dict[str, Dict[str, object]]
+) -> None:
+    if cache_dir is None:
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _cache_file(cache_dir, dataset_key)
+    with cache_path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+
+
+def _metadata_from_cache(entry: Dict[str, object]) -> SessionMetadata:
+    pos_array = np.asarray(entry["pos_2d"], dtype=np.float32)
+    ch_types = entry.get("ch_types")
+    return SessionMetadata(
+        chunk_files=list(entry["chunk_files"]),
+        chunk_length=int(entry["chunk_length"]),
+        last_chunk_length=int(entry.get("last_chunk_length", entry["chunk_length"])),
+        ch_names=list(entry["ch_names"]),
+        pos_2d=pos_array,
+        ch_types=list(ch_types) if ch_types is not None else None,
+        sfreq=float(entry["sfreq"]),
+    )
+
+
+def _metadata_to_cache(metadata: SessionMetadata) -> Dict[str, object]:
+    return {
+        "chunk_files": metadata.chunk_files,
+        "chunk_length": metadata.chunk_length,
+        "last_chunk_length": metadata.last_chunk_length,
+        "ch_names": metadata.ch_names,
+        "pos_2d": metadata.pos_2d.tolist(),
+        "ch_types": metadata.ch_types,
+        "sfreq": metadata.sfreq,
+    }
+
+
+def _prepare_datasets(
+    dataset_root: Union[str, Sequence[str], Mapping[str, str]],
+    example_seconds: float,
+    overlap_seconds: float,
+    cache_dir: Optional[Union[str, Path]] = None,
+    refresh_cache: bool = False,
+) -> PreparedDatasets:
+    dataset_roots = _normalise_roots(dataset_root)
+    if not dataset_roots:
+        raise ValueError("No dataset roots were provided")
+
+    cache_dir_path: Optional[Path]
+    if cache_dir is None:
+        cache_dir_path = None
+    else:
+        cache_dir_path = Path(cache_dir)
+
+    registry = ChannelRegistry()
+    session_channels: Dict[Tuple[str, str], SessionChannels] = {}
+    sessions_per_dataset: Dict[str, List[str]] = {}
+    indices: List[WindowSpec] = []
+
+    window_size: Optional[int] = None
+    overlap_size: Optional[int] = None
+    sfreq_ref: Optional[float] = None
+
+    for dataset_key, root in dataset_roots.items():
+        dataset_cache: Dict[str, Dict[str, object]]
+        if cache_dir_path is None or refresh_cache:
+            dataset_cache = {}
+        else:
+            dataset_cache = _load_dataset_cache(cache_dir_path, dataset_key)
+        session_names = _list_sessions(root)
+        valid_sessions: List[str] = []
+
+        for session in tqdm(session_names, desc=f"Sessions in {dataset_key}"):
+            session_path = Path(root) / session
+
+            metadata: Optional[SessionMetadata] = None
+            if cache_dir_path is not None and not refresh_cache:
+                cached_entry = dataset_cache.get(session)
+                if cached_entry:  # and cached_entry.get("chunk_files") == chunk_files:
+                    metadata = _metadata_from_cache(cached_entry)
+
+            if metadata is None:
+                chunk_files = _list_chunk_files(session_path)
+                if not chunk_files:
+                    continue
+
+                first_chunk = _load_chunk(session_path / chunk_files[0])
+                ch_names = list(first_chunk.get("ch_names", []))
+                if not ch_names:
+                    raise ValueError(
+                        f"Session {session} in dataset {dataset_key} has no chn names"
+                    )
+
+                pos_2d = np.asarray(first_chunk.get("pos_2d"))
+                if pos_2d.size == 0:
+                    raise ValueError(
+                        f"Session {session} in dataset {dataset_key} has no 2D pos"
+                    )
+
+                ch_types = first_chunk.get("ch_types")
+                chunk_length = int(first_chunk["data"].shape[1])
+                last_chunk_length = chunk_length
+                if len(chunk_files) > 1:
+                    last_chunk = _load_chunk(session_path / chunk_files[-1])
+                    last_chunk_length = int(last_chunk["data"].shape[1])
+
+                metadata = SessionMetadata(
+                    chunk_files=chunk_files,
+                    chunk_length=chunk_length,
+                    last_chunk_length=last_chunk_length,
+                    ch_names=ch_names,
+                    pos_2d=pos_2d,
+                    ch_types=list(ch_types) if ch_types is not None else None,
+                    sfreq=float(first_chunk.get("sfreq")),
+                )
+            else:
+                ch_types = metadata.ch_types
+
+            session_channels[(dataset_key, session)] = registry.register(
+                metadata.ch_names, metadata.pos_2d, ch_types
+            )
+
+            sfreq = float(metadata.sfreq)
+            if sfreq_ref is None:
+                sfreq_ref = sfreq
+            elif not np.isclose(sfreq_ref, sfreq, rtol=0, atol=1e-6):
+                raise ValueError(
+                    "All datasets must share the same sampling frequency to build"
+                    " consistent chunks"
+                )
+
+            example_len_samples = int(round(example_seconds * sfreq))
+            if example_len_samples <= 0:
+                raise ValueError("example_seconds results in zero-length windows")
+
+            overlap_samples = int(round(overlap_seconds * sfreq))
+            if overlap_samples >= example_len_samples:
+                raise ValueError("overlap_seconds must be smaller than example_seconds")
+
+            if window_size is None:
+                window_size = example_len_samples
+                overlap_size = overlap_samples
+            else:
+                if example_len_samples != window_size:
+                    raise ValueError(
+                        "All datasets must share the same window length in samples."
+                        " Adjust example_seconds or resample the data."
+                    )
+                if overlap_samples != overlap_size:
+                    raise ValueError(
+                        "All datasets must share the same overlap in samples."
+                        " Adjust overlap_seconds accordingly."
+                    )
+
+            step = example_len_samples - overlap_samples
+            chunk_length = metadata.chunk_length
+            last_chunk_length = metadata.last_chunk_length
+            chunk_files_order = metadata.chunk_files
+
+            for idx_chunk, chunk_name in enumerate(chunk_files_order):
+                total_samples = (
+                    last_chunk_length
+                    if idx_chunk == len(chunk_files_order) - 1
+                    else chunk_length
+                )
+
+                if total_samples < example_len_samples:
+                    # Skip chunks too short for the requested window
+                    continue
+
+                for start in range(0, total_samples - example_len_samples + 1, step):
+                    indices.append(WindowSpec(dataset_key, session, chunk_name, start))
+
+            valid_sessions.append(session)
+
+            if cache_dir_path is not None:
+                dataset_cache[session] = _metadata_to_cache(metadata)
+
+        if valid_sessions:
+            sessions_per_dataset[dataset_key] = valid_sessions
+        if cache_dir_path is not None:
+            _save_dataset_cache(cache_dir_path, dataset_key, dataset_cache)
+
+    if not indices:
+        raise ValueError("No windows were generated from the provided datasets")
+
+    assert (
+        window_size is not None and overlap_size is not None and sfreq_ref is not None
+    )
+
+    layout = registry.build_layout()
+
+    return PreparedDatasets(
+        indices=indices,
+        layout=layout,
+        session_channels=session_channels,
+        dataset_roots=dataset_roots,
+        window_size=window_size,
+        overlap=overlap_size,
+        sfreq=sfreq_ref,
+        sessions_per_dataset=sessions_per_dataset,
+    )
+
+
+def _split_sessions(
+    sessions: Sequence[str],
+    val_ratio: float,
+    test_ratio: float,
+    rng: random.Random,
+) -> Tuple[List[str], List[str], List[str]]:
+    sessions = list(sessions)
+    if not sessions:
+        return [], [], []
+
+    rng.shuffle(sessions)
+    n_total = len(sessions)
+
+    val_count = int(round(n_total * val_ratio))
+    test_count = int(round(n_total * test_ratio))
+
+    val_count = min(val_count, n_total)
+    test_count = min(test_count, n_total - val_count)
+
+    train_count = n_total - val_count - test_count
+    if train_count <= 0 and n_total > 0:
+        # Borrow one session back from validation/test to ensure train is non-empty
+        if val_count > 0:
+            val_count -= 1
+        elif test_count > 0:
+            test_count -= 1
+        train_count = n_total - val_count - test_count
+
+    train = sessions[:train_count]
+    val = sessions[train_count : train_count + val_count]
+    test = sessions[train_count + val_count : train_count + val_count + test_count]
+
+    return train, val, test
+
+
+class ChannelRegistry:
+    """Keeps a canonical ordering of sensors across multiple datasets."""
+
+    def __init__(self, *, decimals: int = 4) -> None:
+        self.decimals = decimals
+        self._entries: List[ChannelEntry] = []
+        self._key_to_index: Dict[Tuple[Tuple[int, int], Union[int, str]], int] = {}
+
+    def _make_key(
+        self, pos: np.ndarray, ch_type: Union[int, str]
+    ) -> Tuple[Tuple[int, int], Union[int, str]]:
+        scale = 10**self.decimals
+        quantised = tuple(int(round(coord * scale)) for coord in pos[:2])
+        return quantised, ch_type
+
+    def register(
+        self,
+        ch_names: Sequence[str],
+        pos_2d: np.ndarray,
+        ch_types: Optional[Sequence[Union[int, str]]] = None,
+    ) -> SessionChannels:
+        if ch_types is None:
+            ch_types = ["unknown"] * len(ch_names)
+
+        canonical_indices = np.empty(len(ch_names), dtype=np.int64)
+
+        for idx, (name, pos, ch_type) in enumerate(zip(ch_names, pos_2d, ch_types)):
+            key = self._make_key(np.asarray(pos), ch_type)
+            if key not in self._key_to_index:
+                entry = ChannelEntry(
+                    pos_sum=np.asarray(pos, dtype=np.float64),
+                    count=1,
+                    ch_type=ch_type,
+                    names={name},
+                )
+                self._key_to_index[key] = len(self._entries)
+                self._entries.append(entry)
+            else:
+                entry = self._entries[self._key_to_index[key]]
+                entry.update(np.asarray(pos, dtype=np.float64), name)
+
+            canonical_indices[idx] = self._key_to_index[key]
+
+        return SessionChannels(indices=canonical_indices)
+
+    def build_layout(self) -> ChannelLayout:
+        names = [entry.canonical_name for entry in self._entries]
+        types = [entry.ch_type for entry in self._entries]
+        pos = np.stack([entry.mean_pos for entry in self._entries], axis=0)
+        return ChannelLayout(names=names, types=types, pos_2d=pos)
+
+
+def build_indices(session_dir: str, example_len: float, overlap: float) -> Tuple[
+    List[Tuple[str, int, int]],
+    int,
+    int,
+    List[str],
+    np.ndarray,
+    float,
+]:
+    """Legacy helper that mirrors the historical build_indices API.
+
+    This function now routes through the multi-dataset-aware preparation logic
+    but only supports a single `session_dir`. It is kept for backwards
+    compatibility with older tests and utilities.
+    """
+
+    prepared = _prepare_datasets(session_dir, example_len, overlap)
+    if len(prepared.dataset_roots) != 1:
+        raise ValueError(
+            "build_indices only supports a single dataset root; please use"
+            " split_datasets for multi-dataset scenarios"
+        )
+
+    dataset_key = next(iter(prepared.dataset_roots))
+
+    legacy_indices: List[Tuple[str, int, int]] = []
+    for spec in prepared.indices:
+        if spec.dataset != dataset_key:
+            continue
+        stem = Path(spec.chunk).stem
+        if not stem.isdigit():
+            raise ValueError(
+                "Legacy build_indices expects chunk filenames to be numeric"
+            )
+        legacy_indices.append((spec.session, int(stem), spec.start))
+
+    return (
+        legacy_indices,
+        prepared.window_size,
+        prepared.overlap,
+        prepared.layout.names,
+        prepared.layout.pos_2d,
+        prepared.sfreq,
+    )
 
 
 def split_datasets(
-    dataset_root: str,
-    example_seconds: int,
-    overlap_seconds: int,
+    dataset_root: Union[str, Sequence[str], Mapping[str, str]],
+    example_seconds: float,
+    overlap_seconds: float,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
     seed: int = 42,
     dataset_class: str = "ChunkDataset",
+    dataset_kwargs: Optional[dict] = None,
+    cache_dir: Optional[Union[str, Path]] = None,
+    refresh_cache: bool = False,
 ) -> Split:
-    """
+    """Create train/val/test splits across one or more MEG datasets.
+
+    Parameters mirror the legacy interface but now support multiple dataset
+    roots. Each dataset is split independently before concatenating indices so
+    that distributional differences do not leak between splits. All channel
+    layouts are merged into a canonical ordering that downstream datasets use
+    to produce consistent tensors regardless of missing sensors.
+
     Args:
-        root: Root directory of the dataset
-        example_len: Length of the example
-        overlap: Overlap between examples
-        val_ratio: Ratio of the validation set
-        test_ratio: Ratio of the test set
-        seed: Random seed
-
-    Returns:
-        Split object containing train, validation, and test datasets
+        cache_dir: Optional directory to persist session metadata between runs.
+            When provided, the datasplitter will avoid reloading chunk files on
+            subsequent startups by replaying cached metadata. Use
+            ``refresh_cache=True`` if new data has been added and the cache
+            should be rebuilt.
     """
-    dataset_class = DATASET_CLASSES[dataset_class]
-    sessions = []
-    for d in os.listdir(dataset_root):
-        if os.path.isdir(os.path.join(dataset_root, d)) and d.startswith("sub-"):
-            sessions.append(d)
 
+    dataset_kwargs = dataset_kwargs or {}
+
+    prepared = _prepare_datasets(
+        dataset_root,
+        example_seconds,
+        overlap_seconds,
+        cache_dir=cache_dir,
+        refresh_cache=refresh_cache,
+    )
     rng = random.Random(seed)
-    rng.shuffle(sessions)
 
-    n_train = int(len(sessions) * (1 - val_ratio - test_ratio))
-    n_val = int(len(sessions) * val_ratio)
-    train_sessions = sessions[:n_train]
-    val_sessions = sessions[n_train : n_train + n_val]
-    test_sessions = sessions[n_train + n_val :]
-    print(f"Train sessions: {len(train_sessions)}")
-    print(f"Val sessions: {len(val_sessions)}")
-    print(f"Test sessions: {len(test_sessions)}")
+    assignments: Dict[Tuple[str, str], str] = {}
+    for dataset_key, sessions in prepared.sessions_per_dataset.items():
+        train_s, val_s, test_s = _split_sessions(sessions, val_ratio, test_ratio, rng)
 
-    all_indices, example_len_samples, overlap_samples, ch_names, pos_2d, sfreq = (
-        build_indices(dataset_root, example_seconds, overlap_seconds)
+        for session in train_s:
+            assignments[(dataset_key, session)] = "train"
+        for session in val_s:
+            assignments[(dataset_key, session)] = "val"
+        for session in test_s:
+            assignments[(dataset_key, session)] = "test"
+
+        print(
+            f"Dataset {dataset_key}: "
+            f"train={len(train_s)} val={len(val_s)} test={len(test_s)}"
+        )
+
+    def collect(split: str) -> List[WindowSpec]:
+        return [
+            spec
+            for spec in prepared.indices
+            if assignments.get((spec.dataset, spec.session), "train") == split
+        ]
+
+    train_idx = collect("train")
+    val_idx = collect("val")
+    test_idx = collect("test")
+
+    dataset_class_impl = DATASET_CLASSES[dataset_class]
+
+    common_kwargs = dict(
+        root_dir=prepared.dataset_roots,
+        length=prepared.window_size,
+        ch_names=prepared.layout.names,
+        pos_2d=prepared.layout.pos_2d,
+        sfreq=prepared.sfreq,
+        ch_types=prepared.layout.types,
+        session_channels=prepared.session_channels,
     )
+    common_kwargs.update(dataset_kwargs)
 
-    def collect(sess_list: List[str]) -> List[Tuple[str, int, int]]:
-        return [i for i in all_indices if i[0] in sess_list]
+    train_ds = dataset_class_impl(indices=train_idx, **common_kwargs)
+    val_ds = dataset_class_impl(indices=val_idx, **common_kwargs)
+    test_ds = dataset_class_impl(indices=test_idx, **common_kwargs)
 
-    train_idx = collect(train_sessions)
-    val_idx = collect(val_sessions)
-    test_idx = collect(test_sessions)
-
-    train_ds = dataset_class(
-        dataset_root, train_idx, example_len_samples, ch_names, pos_2d, sfreq
-    )
-    val_ds = dataset_class(
-        dataset_root, val_idx, example_len_samples, ch_names, pos_2d, sfreq
-    )
-    test_ds = dataset_class(
-        dataset_root, test_idx, example_len_samples, ch_names, pos_2d, sfreq
-    )
     return Split(train_ds, val_ds, test_ds)
-
-
-@dataclass
-class SplitLibriBrain:
-    train: RandomLabelGroupedDataset
-    val: RandomLabelGroupedDataset
-    test: RandomLabelGroupedDataset
-
-
-def split_datasets_libribrain(
-    dataset_root: str,
-    tmin: float = 0.0,
-    tmax: float = 0.5,
-    grouped_samples_std: int = 0,
-    dataset_class: str = "RandomLabelGroupedDataset",
-    lazy_cache: bool = False,
-    cache_max_gb: Optional[float] = None,
-):
-    train_dataset = LibriBrainPhoneme(
-        data_path=f"{dataset_root}/data/",
-        partition="train",
-        # include_run_keys=[("0", str(i), "Sherlock1", "1") for i in range(1, 10)],
-        tmin=tmin,
-        tmax=tmax,
-    )
-
-    val_dataset = LibriBrainPhoneme(
-        data_path=f"{dataset_root}/data/",
-        partition="validation",
-        tmin=tmin,
-        tmax=tmax,
-    )
-
-    test_dataset = LibriBrainPhoneme(
-        data_path=f"{dataset_root}/data/",
-        partition="test",
-        tmin=tmin,
-        tmax=tmax,
-    )
-
-    # compute maximum absolute value of training data
-    # max_val = 10.0
-    # for example, _ in train_dataset:
-    #    max_val = max(max_val, torch.max(torch.abs(example)))
-
-    common_kwargs = {"lazy_cache": lazy_cache, "cache_max_gb": cache_max_gb}
-    kwargs_train = {
-        "grouped_samples_std": grouped_samples_std,
-        "training": True,
-        **common_kwargs,
-    }
-    kwargs_val = {"grouped_samples_std": 0, **common_kwargs}
-    kwargs_test = {"grouped_samples_std": 0, **common_kwargs}
-
-    dataset_class = DATASET_CLASSES[dataset_class]
-
-    averaged_train = dataset_class(train_dataset, **kwargs_train)
-    averaged_val = dataset_class(val_dataset, **kwargs_val)
-    averaged_test = dataset_class(test_dataset, **kwargs_test)
-
-    return Split(averaged_train, averaged_val, averaged_test)

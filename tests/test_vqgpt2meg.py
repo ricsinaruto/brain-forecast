@@ -120,7 +120,7 @@ def test_grad_causality_vqgpt2meg_token_level(monkeypatch):
         double_z=False,
         in_channels=1,
         out_channels=1,
-        temporal_downsample_factor=1,
+        temporal_downsample_factor=2,
         ch=64,
         ch_mult=[1, 2, 2, 2, 2],
         num_res_blocks=2,

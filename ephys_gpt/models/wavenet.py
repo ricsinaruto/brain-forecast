@@ -391,7 +391,7 @@ class Wavenet3DLayer(nn.Module):
             # pad order for 5D input: (W_left, W_right, H_left,
             # H_right, D_left, D_right); here we treat temporal dim
             # as "W"
-            p = (self.causal_left_pad, 0, 0, 0, 0, 0)
+            p = (self.causal_left_pad, 0)
             x_dilated = self.conv_dilation(F.pad(x, p))
         else:
             x_dilated = self.conv_dilation(x)

@@ -112,17 +112,21 @@ class EvalFlow(EvalQuant):
             mse_horizon, "mse_future.pdf", "MSE", "Forecast horizon (frames)"
         )
 
+    @torch.inference_mode()
     def step_free_running(self) -> None:  # type: ignore[override]
         total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
         # pick a random trial image and start from first frame
         img, _ = next(iter(self.test_loader))
         if isinstance(img, (list, tuple)):
             img = img[0]
-        img = img.to(self.device)
-        ctx = img[..., : self._get_max_hist()]
-        steps_left = max(total_steps - ctx.shape[-1], 1)
-        gen = self.model.forecast(ctx, steps=steps_left)
+        ctx = img[:1].to(self.device)
+
+        gen = self.model.forecast(ctx, steps=total_steps)
+
+        # remove input context
+        gen = gen[..., ctx.shape[-1] :]
+
         chans = self._images_to_channels(gen).squeeze(0).cpu().numpy()
-        np.save(self.out_dir / "generated_megformer.npy", chans)
+        np.save(self.out_dir / "generated.npy", chans)
         self._eval_psd_cov(chans, prefix="gen")
         self._eval_psd_cov(self._get_test_deq(), prefix="test")

@@ -1,0 +1,17 @@
+channels: 272
+samples: 400
+encoder_h: 384
+enc_width: [2, 2, 2, 2, 2, 2]
+enc_downsample: [2, 1, 1, 2, 1, 1]
+transformer_layers: 12
+dropout: 0.0
+
+attn_type: standard
+mlp_type: standard
+
+attn_args:
+  nheads: 12
+  dropout: 0.0
+  rope: true
+
+mlp_args: {}

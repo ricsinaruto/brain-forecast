@@ -1,0 +1,51 @@
+model_config: configs/ck3d/model.yaml
+augmentations: configs/local/augmentations.yaml
+
+save_dir: /vol/data/trainings/omega/ck3d
+resume_from: null
+
+model_name: CK3D
+loss_name: CrossEntropy
+
+datasplitter:
+  dataset_class: ChunkDatasetImageQuantized
+  dataset_root: "/vol/data/datasets/Omega/preprocessed_cloud"
+  example_seconds: 0.5
+  overlap_seconds: 0.25
+  val_ratio: 0.1
+  test_ratio: 0.1
+  refresh_cache: false  # need to refresh if any datasplitter args change
+  cache_dir: /vol/data/datasets/Omega/local_cache/preprocessed500ms
+
+dataloader:
+  batch_size: 16
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+loss:
+  label_smoothing: 0.0
+  l1: 0.0
+
+lightning:
+  lr: 1.0e-6
+  weight_decay: 0.0
+  compile: true
+  log_samples: false
+  log_psd: False
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-8
+    T_max: 50
+
+trainer:
+  max_epochs: 50
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 100
+  precision: 16-mixed
+  gradient_clip_val: 10.0

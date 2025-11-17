@@ -1,0 +1,45 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/gpt2meg_trf/model.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/omega/gpt2meg_trf/test
+resume_from: null
+
+model_name: GPT2MEG_Trf
+loss_name: CrossEntropy
+eval_class: EvalQuant
+
+datasplitter:
+  dataset_class: ChunkDataset
+  dataset_root: "/vol/data/datasets/Omega/preprocessed_cloud"
+  example_seconds: 30
+  overlap_seconds: 0.0
+  val_ratio: 0.1
+  test_ratio: 0.1
+  refresh_cache: false  # need to refresh if any datasplitter args change
+  cache_dir: null # /vol/data/datasets/Omega/local_cache/preprocessed500ms
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: true
+  future_steps: 10
+  gen_seconds: 1
+  gen_sampling: top_p
+  channel_shape: [274]
+  num_channels: 274
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/omega/gpt2meg_trf/lightning_logs/version_8/checkpoints/last-checkpoint.ckpt

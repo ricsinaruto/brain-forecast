@@ -1,4 +1,4 @@
-model_config: configs/models/stgpt2meg.yaml
+model_config: configs/stgpt2meg/model_convblock.yaml
 augmentations: configs/augmentations.yaml
 
 save_dir: trainings/stgpt2meg

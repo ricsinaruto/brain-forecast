@@ -1,12 +1,12 @@
 import argparse
 import yaml
 
-from ephys_gpt import Omega
+from ephys_gpt import Omega, MOUS, MOUSConditioned
 
 
 def main(cli_args=None):
     # parse arguments to script
-    dataset_choices = ["omega"]
+    dataset_choices = ["omega", "mous", "mous_conditioned"]
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-a",
@@ -43,6 +43,10 @@ def main(cli_args=None):
 
     if script_args.dataset == "omega":
         experiment = Omega(**args)
+    elif script_args.dataset == "mous":
+        experiment = MOUS(**args)
+    elif script_args.dataset == "mous_conditioned":
+        experiment = MOUSConditioned(**args)
     else:
         raise ValueError(
             f"Invalid dataset: {script_args.dataset}. "

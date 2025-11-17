@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Tuple
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -137,25 +138,37 @@ class MEGFormer(nn.Module):
         # encode context
         z_ctx, _ = self._encode(x_context)  # (B*T_ctx, L, C)
         L = z_ctx.shape[1]
-        seq = rearrange(z_ctx, "(b t) l c -> b (t l) c", b=B, t=T_ctx)  # (B, S_ctx, C)
+        global_seq = rearrange(
+            z_ctx, "(b t) l c -> b (t l) c", b=B, t=T_ctx
+        )  # (B, S_ctx, C)
+
+        # maintain a sliding window so decoder input never exceeds available time ids
+        max_time_ids = self.time_pos.num_embeddings
+        max_tokens = max_time_ids * L
+        window_seq = global_seq
+        window_start = 0  # index of the first token currently in the window
+        if window_seq.shape[1] > max_tokens:
+            tokens_to_drop = window_seq.shape[1] - max_tokens
+            window_seq = window_seq[:, tokens_to_drop:, :]
+            window_start += tokens_to_drop
 
         # generate tokens one-by-one; need steps*L tokens to form `steps` full frames
-        for _ in range(steps * L):
-            S = seq.shape[1]
-            tok = self.token_proj(seq)
+        for _ in tqdm(range(steps * L), desc="Forecasting "):
+            S = window_seq.shape[1]
+            tok = self.token_proj(window_seq)
 
-            # positions up to the current S
-            patch_ids = (
-                (torch.arange(S, device=seq.device) % L).unsqueeze(0).expand(B, -1)
+            # positions up to the current S (relative to the global sequence)
+            token_positions = torch.arange(
+                window_start,
+                window_start + S,
+                device=window_seq.device,
+                dtype=torch.long,
             )
-            time_ids = (
-                (torch.arange(S, device=seq.device) // L).unsqueeze(0).expand(B, -1)
-            )
-            tok = (
-                tok
-                + self.space_pos(patch_ids)
-                + self.time_pos(time_ids.clamp_max(self.time_pos.num_embeddings - 1))
-            )
+            patch_ids = (token_positions % L).unsqueeze(0).expand(B, -1)
+            time_ids_full = token_positions // L
+            time_offset = time_ids_full.min()
+            time_ids = (time_ids_full - time_offset).unsqueeze(0).expand(B, -1)
+            tok = tok + self.space_pos(patch_ids) + self.time_pos(time_ids)
 
             for layer in self.decoder:
                 tok = layer(tok, causal=True)
@@ -166,14 +179,19 @@ class MEGFormer(nn.Module):
             mix_idx = torch.multinomial(pi, 1).squeeze(-1)  # (B,)
             mu = mu.squeeze(1)  # (B, n_mix, C)
             sigma = log_sigma.squeeze(1).exp()  # (B, n_mix, C)
-            z_next = mu[torch.arange(B, device=seq.device), mix_idx]
+            z_next = mu[torch.arange(B, device=window_seq.device), mix_idx]
             z_next = z_next + sigma[
-                torch.arange(B, device=seq.device), mix_idx
+                torch.arange(B, device=window_seq.device), mix_idx
             ] * torch.randn_like(z_next)
-            seq = torch.cat([seq, z_next.unsqueeze(1)], dim=1)
+            global_seq = torch.cat([global_seq, z_next.unsqueeze(1)], dim=1)
+            window_seq = torch.cat([window_seq, z_next.unsqueeze(1)], dim=1)
+            if window_seq.shape[1] > max_tokens:
+                tokens_to_drop = L
+                window_seq = window_seq[:, tokens_to_drop:, :]
+                window_start += tokens_to_drop
 
         total_T = T_ctx + steps
-        z_full = rearrange(seq, "b (t l) c -> (b t) l c", l=L)
+        z_full = rearrange(global_seq, "b (t l) c -> (b t) l c", l=L)
         # reshape to grid and invert flow
         h = w = int(L**0.5)
         z_grid = rearrange(z_full, "(bt) (h w) c -> bt h w c", bt=B * total_T, h=h, w=w)

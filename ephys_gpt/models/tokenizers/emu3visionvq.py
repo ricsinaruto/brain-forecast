@@ -890,6 +890,9 @@ class Emu3VisionVQ(nn.Module):
             nn.init.constant_(module.bias, 0)
 
     def encode(self, x: torch.Tensor):
+        if isinstance(x, tuple) or isinstance(x, list):
+            x = x[0]  # kind of hacky assuming tensor is first element of tuple/list
+
         x_in = x
         if x_in.ndim == 3:
             x_in = x_in.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
@@ -946,6 +949,8 @@ class Emu3VisionVQ(nn.Module):
         return video
 
     def forward(self, x: torch.Tensor):
+        if isinstance(x, tuple) or isinstance(x, list):
+            x = x[0]  # kind of hacky assuming tensor is first element of tuple/list
         quant, qloss, _ = self.encode(x)
 
         quant = quant.permute(0, 2, 1, 3, 4).contiguous()  # (B,C,T,H,W)
@@ -954,7 +959,6 @@ class Emu3VisionVQ(nn.Module):
         video = video.permute(0, 3, 4, 1, 2)  # (B,H,W,T,C)
         rec = video[..., 0]
 
-        # rec_loss = F.mse_loss(rec, target) / 0.06
         return (rec, {"commitment_loss": qloss})
 
 

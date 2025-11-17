@@ -1,9 +1,0 @@
-num_channels: 272
-vocab_size: 256
-d_model: 32
-layers: 4
-trf_block: STBlock
-
-trf_args:
-  num_heads: 8
-  mlp_ratio: 4.0

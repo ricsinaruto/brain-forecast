@@ -1,0 +1,44 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/stgpt2meg/model.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/omega/stgpt2meg
+resume_from: null
+
+model_name: stgpt2meg
+loss_name: CrossEntropy
+eval_class: EvalQuant
+
+datasplitter:
+  dataset_class: ChunkDataset
+  dataset_root: "/vol/data/datasets/Omega/preprocessed_cloud"
+  example_seconds: 0.5  # lower because of large memory cost
+  overlap_seconds: 0.25
+  val_ratio: 0.1
+  test_ratio: 0.1
+  refresh_cache: false  # need to refresh if any datasplitter args change
+  cache_dir: /vol/data/datasets/Omega/local_cache/preprocessed500ms
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  future_steps: 10
+  gen_seconds: 60
+  gen_sampling: top_p
+  channel_shape: [274]
+  num_channels: 274
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/omega/stgpt2meg/lightning_logs/version_10/checkpoints/last-checkpoint.ckpt

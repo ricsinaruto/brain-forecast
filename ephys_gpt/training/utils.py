@@ -1,5 +1,6 @@
 from ..losses import (
     CrossEntropy,
+    CrossEntropyWeighted,
     MSE,
     BrainTokenizerLoss,
     CrossEntropyWithCodes,
@@ -7,6 +8,9 @@ from ..losses import (
     VQNSPLoss,
     NLL,
     VQVAELoss,
+    ChronoFlowLoss,
+    CrossEntropyBalanced,
+    CrossEntropyMasked,
 )
 from ..models import (
     GPT2MEG,
@@ -27,6 +31,14 @@ from ..models import (
     TASA3D,
     CK3D,
     CNNLSTM,
+    CNNLSTMSimple,
+    ClassifierContinuous,
+    ClassifierQuantized,
+    ClassifierQuantizedImage,
+    GPT2MEGMix,
+    GPT2MEG_Trf,
+    ChronoFlowSSM,
+    GPT2MEG_Cond,
 )
 
 
@@ -51,6 +63,14 @@ def get_model_class(model_name: str):
         "TASA3D": TASA3D,
         "CK3D": CK3D,
         "CNNLSTM": CNNLSTM,
+        "CNNLSTMSimple": CNNLSTMSimple,
+        "ClassifierContinuous": ClassifierContinuous,
+        "ClassifierQuantized": ClassifierQuantized,
+        "ClassifierQuantizedImage": ClassifierQuantizedImage,
+        "GPT2MEGMix": GPT2MEGMix,
+        "GPT2MEG_Trf": GPT2MEG_Trf,
+        "ChronoFlowSSM": ChronoFlowSSM,
+        "GPT2MEG_Cond": GPT2MEG_Cond,
     }
     if model_name not in model_classes:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -61,6 +81,7 @@ def get_loss_class(loss_name: str):
     """Get loss class by name."""
     loss_classes = {
         "CrossEntropy": CrossEntropy,
+        "CrossEntropyWeighted": CrossEntropyWeighted,
         "MSE": MSE,
         "BrainTokenizerLoss": BrainTokenizerLoss,
         "CrossEntropyWithCodes": CrossEntropyWithCodes,
@@ -68,6 +89,9 @@ def get_loss_class(loss_name: str):
         "VQNSPLoss": VQNSPLoss,
         "NLL": NLL,
         "VQVAELoss": VQVAELoss,
+        "ChronoFlowLoss": ChronoFlowLoss,
+        "CrossEntropyBalanced": CrossEntropyBalanced,
+        "CrossEntropyMasked": CrossEntropyMasked,
     }
     if loss_name not in loss_classes:
         raise ValueError(f"Unknown loss name: {loss_name}")

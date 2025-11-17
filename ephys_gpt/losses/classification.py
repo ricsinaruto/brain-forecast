@@ -1,30 +1,49 @@
 import torch
 from torch import nn
 
-from ..metrics import accuracy, top_k_accuracy, f1_score
+from ..metrics import accuracy, top_k_accuracy, f1_score, mse_loss
 
 
 class CrossEntropy(nn.Module):
-    def __init__(self, label_smoothing: float = 0.0, l1: float = 0.0, l2: float = 0.0):
+    def __init__(
+        self,
+        label_smoothing: float = 0.0,
+        l1: float = 0.0,
+        l2: float = 0.0,
+        use_f1: bool = False,
+        use_mse: bool = True,
+        half_window: bool = False,
+    ):
         super().__init__()
         self.label_smoothing = label_smoothing
         self.l1 = l1
         self.l2 = l2
+        self.half_window = half_window
 
-        self.metrics = {
-            "acc": accuracy,
-            "top5": top_k_accuracy,
-            "f1": f1_score,
-        }
+        self.metrics = {"acc": accuracy}
+
+        if use_f1:
+            self.metrics["f1"] = f1_score
+
+        if use_mse:
+            self.metrics["mse"] = mse_loss
 
     def forward(
         self,
         logits: torch.Tensor,
         targets: torch.Tensor,
         model: nn.Module | None = None,
+        weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Cross entropy supporting soft targets and regularisation."""
         mask = None
+
+        if isinstance(targets, tuple) or isinstance(targets, list):
+            targets = targets[0]
+
+        if self.half_window:
+            targets = targets[..., targets.shape[-1] // 2 :]
+            logits = logits[..., logits.shape[-2] // 2 :, :]
 
         if targets.dim() == logits.dim():
             loss = (-targets * torch.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
@@ -35,8 +54,9 @@ class CrossEntropy(nn.Module):
                 targets = targets.view(-1)[mask]
 
             loss = nn.functional.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1),
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+                weight=weight,
                 label_smoothing=self.label_smoothing,
             )
 
@@ -45,6 +65,53 @@ class CrossEntropy(nn.Module):
             loss = loss + self.l1 * l1_pen
 
         return loss
+
+
+class CrossEntropyMasked(CrossEntropy):
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        model: nn.Module | None = None,
+    ) -> torch.Tensor:
+        targets, mask = targets
+
+        new_logits = []
+        new_targets = []
+        for i in range(logits.shape[0]):
+            new_logits.append(logits[i, mask[i]])
+            new_targets.append(targets[i, mask[i]])
+
+        logits = torch.cat(new_logits, dim=0)
+        targets = torch.cat(new_targets, dim=0)
+        return super().forward(logits, targets, model)
+
+
+class CrossEntropyWeighted(CrossEntropy):
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        model: nn.Module | None = None,
+    ) -> torch.Tensor:
+        weight = None
+        if isinstance(targets, tuple) or isinstance(targets, list):
+            targets, weight = targets[0], targets[1][0]
+
+        return super().forward(logits, targets, model, weight)
+
+
+class CrossEntropyBalanced(CrossEntropy):
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        model: nn.Module | None = None,
+    ) -> torch.Tensor:
+        if isinstance(targets, tuple) or isinstance(targets, list):
+            targets, weight = targets[0], targets[1][0]
+            logits = logits + weight
+        return super().forward(logits, targets, model)
 
 
 class CrossEntropyWithCodes(CrossEntropy):

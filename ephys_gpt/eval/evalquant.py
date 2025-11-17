@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 import matplotlib.pyplot as plt
@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from ..dataset import split_datasets
 from ..training.utils import get_model_class
-from ..utils.quantizers import mulaw_inv_torch
+from ..utils.quantizers import mulaw_inv_torch, mulaw_inv
 from ..utils.plotting import plot_psd
 from ..utils.eval import sample
 
@@ -43,14 +43,25 @@ class EvalQuant:
         split = split_datasets(**cfg["datasplitter"])
         dl_kwargs = {"shuffle": False, **cfg["dataloader"]}
         self.test_dataset = split.test
+        self.train_dataset = split.train
         self.test_loader = DataLoader(split.test, **dl_kwargs)
         first_inputs, _ = split.test[0]
 
         if isinstance(first_inputs, (list, tuple)):
             first_inputs = first_inputs[0]
 
+        input_overlap = cfg["datasplitter"]["overlap_seconds"]
+        self.input_overlap = int(input_overlap * split.test.sfreq)
+
         self.channel_shape = self.eval_args["channel_shape"]
         self.num_channels = self.eval_args["num_channels"]
+        self.save_test_data = self.eval_args.get("save_test_data", False)
+        self.use_test_dataset = self.eval_args.get("use_test_dataset", False)
+        if self.use_test_dataset:
+            self.dataset = self.test_dataset
+        else:
+            self.dataset = self.train_dataset
+
         self._fallback_max_hist = int(first_inputs.shape[-1])
         self.pos_2d = np.array(split.test.pos_2d)
         self.sfreq = split.test.sfreq
@@ -63,7 +74,7 @@ class EvalQuant:
         if DEBUG and hasattr(self.model, "_orig_mod"):
             self.model = self.model._orig_mod  # for compiled models
 
-        self.max_hist = self._get_max_hist() - 1
+        self.max_hist = self._get_max_hist()
         self.mu = getattr(self.model, "quant_levels", 256) - 1
 
         # --------------------------- output dir ---------------------
@@ -73,11 +84,11 @@ class EvalQuant:
         self._cached_test_deq: np.ndarray | None = None  # (C,T_total)
 
     def run_all(self) -> None:
-        print("[EVAL] 1/3  history length sweep …")
-        self.step_history_sweep()
+        # print("[EVAL] 1/3  history length sweep …")
+        # self.step_history_sweep()
 
-        print("[EVAL] 2/3  recursive N-step forecasting …")
-        self.step_recursive_future()
+        # print("[EVAL] 2/3  recursive N-step forecasting …")
+        # self.step_recursive_future()
 
         print("[EVAL] 3/3  free-running generation …")
         self.step_free_running()
@@ -173,9 +184,9 @@ class EvalQuant:
 
         self.eval_args["gen_sampling"] = strategy
 
-        if hasattr(self.test_dataset, "reshape"):
-            acc_horizon = self.test_dataset.reshape(acc_horizon)
-            mse_horizon = self.test_dataset.reshape(mse_horizon)
+        if hasattr(self.test_dataset, "postprocessor"):
+            acc_horizon = self.test_dataset.postprocessor.reshape(acc_horizon)
+            mse_horizon = self.test_dataset.postprocessor.reshape(mse_horizon)
 
         acc_horizon = (acc_horizon / total_tokens).cpu().numpy()  # (C, N)
         mse_horizon = (mse_horizon / total_tokens).cpu().numpy()  # (C, N)
@@ -247,11 +258,11 @@ class EvalQuant:
                 if DEBUG and t > H + 10:
                     break
 
-        if hasattr(self.test_dataset, "reshape"):
-            acc_hist = self.test_dataset.reshape(acc_hist)
-            mse_hist = self.test_dataset.reshape(mse_hist)
-            acc_sum = self.test_dataset.reshape(acc_sum)
-            mse_sum = self.test_dataset.reshape(mse_sum)
+        if hasattr(self.test_dataset, "postprocessor"):
+            acc_hist = self.test_dataset.postprocessor.reshape(acc_hist)
+            mse_hist = self.test_dataset.postprocessor.reshape(mse_hist)
+            acc_sum = self.test_dataset.postprocessor.reshape(acc_sum)
+            mse_sum = self.test_dataset.postprocessor.reshape(mse_sum)
 
         # compute metrics for last-timepoint
         self.step_basic_metrics(acc_sum, mse_sum, total_tokens)
@@ -303,13 +314,33 @@ class EvalQuant:
             Array of shape (C, 1+total_steps) containing the generated sequence
         """
         total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
-        unroll_steps = self.eval_args.get("unroll_steps", 10)
+        unroll_steps = self.eval_args.get("unroll_steps", 1)
+        print(f"Unroll steps during recursive forecasting: {unroll_steps}")
 
         # ------- random single-token context -------
-        trial_idx = random.randrange(len(self.test_dataset))
-        quant_seq, _ = self.test_dataset[trial_idx]  # (...,T)
-        t = random.randrange(quant_seq.shape[-1])
-        ctx_quant = quant_seq[..., t : t + 1]  # (...,1)
+        trial_idx = random.randrange(len(self.train_dataset))
+        quant_seq, _ = self.train_dataset[trial_idx]  # (...,T) or ((...,T), cond)
+
+        cond_sequence_full: torch.Tensor | None = None
+        cond_history: torch.Tensor | None = None
+        cond_pointer: int | None = None
+
+        if isinstance(quant_seq, (tuple, list)):
+            ctx_quant = quant_seq[0]
+            initial_cond = quant_seq[1]
+            cond_needed = ctx_quant.shape[-1] + total_steps
+            cond_sequence_full = self._assemble_condition_sequence(
+                trial_idx, cond_needed, initial_cond
+            ).unsqueeze(
+                0
+            )  # (1, C_cond, L_total)
+            cond_history = cond_sequence_full[..., : ctx_quant.shape[-1]].to(
+                self.device
+            )
+            cond_pointer = ctx_quant.shape[-1]
+        else:
+            ctx_quant = quant_seq
+
         ctx = ctx_quant.unsqueeze(0).to(self.device)  # (1,...,1)
 
         # ------- iterative growth -------
@@ -324,16 +355,39 @@ class EvalQuant:
             if ctx.shape[-1] < self.max_hist:
                 N = self.max_hist - 1  # full generation first
 
-            new_tokens = self._recursive_forecast(ctx[..., -self.max_hist + N :], N)
+            ctx_slice = ctx[..., -self.max_hist + N - 1 :]
+            cond_future_chunk = None
+            condition_inputs: Tuple[torch.Tensor, torch.Tensor] | None = None
+            if cond_history is not None and cond_sequence_full is not None:
+                cond_slice = cond_history[..., -self.max_hist + N - 1 :]
+                assert cond_pointer is not None
+                cond_future_chunk = cond_sequence_full[
+                    ..., cond_pointer : cond_pointer + N
+                ].to(self.device)
+                if cond_future_chunk.shape[-1] < N:
+                    raise RuntimeError(
+                        "Insufficient condition labels assembled for generation."
+                    )
+                condition_inputs = (cond_slice, cond_future_chunk)
+
+            new_tokens = self._recursive_forecast(
+                ctx_slice,
+                N,
+                condition=condition_inputs,
+            )
             ctx = torch.cat([ctx, new_tokens], dim=-1)
+            if cond_history is not None and cond_future_chunk is not None:
+                cond_history = torch.cat([cond_history, cond_future_chunk], dim=-1)
+                cond_pointer += N
             steps_left -= N
             pbar.update(N)
         pbar.close()
 
         gen_deq = mulaw_inv_torch(ctx.squeeze(0), self.mu)
+        gen_deq = gen_deq[..., ctx_quant.shape[-1] :]
 
-        if hasattr(self.test_dataset, "reshape"):
-            gen_deq = self.test_dataset.reshape(gen_deq)
+        if hasattr(self.test_dataset, "postprocessor"):
+            gen_deq = self.test_dataset.postprocessor.reshape(gen_deq)
 
         gen_deq = gen_deq.cpu().numpy()
 
@@ -342,7 +396,12 @@ class EvalQuant:
         return gen_deq
 
     @torch.inference_mode()
-    def _recursive_forecast(self, ctx: Tensor, N: int) -> Tensor:
+    def _recursive_forecast(
+        self,
+        ctx: Tensor,
+        N: int,
+        condition: Optional[Tuple[Tensor, Tensor]] = None,
+    ) -> Tensor:
         """Forecast *N* tokens given `ctx`; supports various sampling strategies.
 
         Args:
@@ -360,17 +419,42 @@ class EvalQuant:
             "top_p": self.eval_args.get("top_p", 0.0),
         }
 
-        if hasattr(self.model, "generate"):
+        cond_hist: Tensor | None = None
+        cond_future: Tensor | None = None
+        if condition is not None:
+            if not isinstance(condition, (tuple, list)) or len(condition) != 2:
+                raise ValueError("Condition must be a (history, future) tuple.")
+            cond_hist = condition[0].clone()
+            cond_future = condition[1]
+            if cond_future.shape[-1] < N:
+                raise ValueError(
+                    "Cond future chunk must be at least as long as forecast horizon."
+                )
+
+        if hasattr(self.model, "generate") and cond_hist is None:
             return self.model.generate(ctx.clone(), N, sample_args)
 
         seq = ctx.clone()
+        cond_seq = cond_hist.clone() if cond_hist is not None else None
         generated: List[Tensor] = []
         cache = {}
-        for _ in range(N):
-            try:
-                logits, cache = self._fwd(seq, past_key_values=cache)  # (B,...,T,Q)
-            except (TypeError, ValueError):
-                logits = self._fwd(seq)  # type: ignore[assignment]
+        for i in range(N):
+            model_input: Tensor | Tuple[Tensor, Tensor]
+            if cond_seq is not None:
+                if cond_future is None:
+                    raise ValueError(
+                        "Future condition sequence missing while conditioning enabled."
+                    )
+                model_input = (seq, cond_seq)
+            else:
+                model_input = seq
+
+            # try:
+            #    logits, cache = self._fwd(
+            #        model_input, past_key_values=cache
+            #    )  # (B,...,T,Q)
+            # except (TypeError, ValueError):
+            logits = self._fwd(model_input)  # type: ignore[assignment]
 
             next_logits = logits[..., -1, :]  # (B,...,Q)
             next_tok = sample(next_logits, **sample_args)  # (B,...)
@@ -378,8 +462,14 @@ class EvalQuant:
 
             if cache:
                 seq = next_tok.unsqueeze(-1)
+                if cond_seq is not None:
+                    next_cond = cond_future[..., i : i + 1]
+                    cond_seq = next_cond
             else:
                 seq = torch.cat([seq, next_tok.unsqueeze(-1)], dim=-1)
+                if cond_seq is not None:
+                    next_cond = cond_future[..., i : i + 1]
+                    cond_seq = torch.cat([cond_seq, next_cond], dim=-1)
         return torch.stack(generated, dim=-1)  # (B,...,N)
 
     # -----------------------------------
@@ -564,6 +654,39 @@ class EvalQuant:
         fig.savefig(self.out_dir / f"{fname.split('.')[0]}.png", bbox_inches="tight")
         plt.close(fig)
 
+    def _assemble_condition_sequence(
+        self, start_idx: int, required_length: int, initial_cond: Tensor
+    ) -> Tensor:
+        """
+        Concatenate condition labels starting from `start_idx` until `required_length`.
+        """
+
+        dataset_len = len(self.train_dataset)
+        if dataset_len == 0:
+            raise RuntimeError(
+                "Test dataset is empty; cannot assemble condition labels."
+            )
+
+        cond_chunks = [initial_cond.clone()]
+        total_len = int(initial_cond.shape[-1])
+        idx = (start_idx + 1) % dataset_len
+
+        while total_len < required_length:
+            inputs, _ = self.train_dataset[idx]
+            if not isinstance(inputs, (tuple, list)) or len(inputs) < 2:
+                raise RuntimeError(
+                    "Encountered sample without condition labels during assembly."
+                )
+            cond_chunk = inputs[1]
+            if cond_chunk.shape[-1] == 0:
+                raise RuntimeError("Encountered empty condition chunk in dataset.")
+            cond_chunks.append(cond_chunk.clone())
+            total_len += int(cond_chunk.shape[-1])
+            idx = (idx + 1) % dataset_len
+
+        cond_seq = torch.cat(cond_chunks, dim=-1)
+        return cond_seq[..., :required_length]
+
     def _get_test_deq(self) -> np.ndarray:
         """
         Get the de-quantised test set.
@@ -573,15 +696,27 @@ class EvalQuant:
         """
         if self._cached_test_deq is None:
             print("[EVAL] Assembling de-quantised full test set …")
-            chans: List[np.ndarray] = [np.empty((*self.channel_shape, 0))]
-            for inp, _ in self.test_dataset:
-                dec = mulaw_inv_torch(inp, self.mu).numpy()
-                chans.append(dec)
-            self._cached_test_deq = np.concatenate(chans, axis=-1)
+            quant_chans: List[np.ndarray] = [np.empty((*self.channel_shape, 0))]
+            for i, (inp, _) in tqdm(
+                enumerate(self.dataset), desc="assembling dataset"
+            ):
+                if isinstance(inp, (tuple, list)):
+                    inp = inp[0]
+                inp = inp[..., self.input_overlap :]
+                quant_chans.append(inp.cpu().numpy())
+            self._cached_quant_test_deq = np.concatenate(quant_chans, axis=-1)
 
-            if hasattr(self.test_dataset, "reshape"):
+            # save to file
+            if self.save_test_data:
+                np.save(self.out_dir / "test_quant.npy", self._cached_quant_test_deq)
+
+            self._cached_test_deq = mulaw_inv(self._cached_quant_test_deq, self.mu)
+
+            if hasattr(self.test_dataset, "postprocessor"):
                 self._cached_test_deq = torch.from_numpy(self._cached_test_deq)
-                self._cached_test_deq = self.test_dataset.reshape(self._cached_test_deq)
+                self._cached_test_deq = self.test_dataset.postprocessor.reshape(
+                    self._cached_test_deq
+                )
                 self._cached_test_deq = self._cached_test_deq.numpy()
 
         return self._cached_test_deq

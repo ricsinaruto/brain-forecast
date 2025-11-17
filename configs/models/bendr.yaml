@@ -1,9 +1,0 @@
-channels: 272
-samples: 400
-encoder_h: 512
-enc_width: [3, 2, 2, 2, 2, 2]
-enc_downsample: [2, 2, 2, 1, 1, 1]
-contextual_hidden: 3076
-transformer_layers: 8
-transformer_heads: 8
-dropout: 0.15

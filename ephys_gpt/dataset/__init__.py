@@ -4,8 +4,16 @@ from .datasets import (
     ChunkDatasetImage,
     ChunkDatasetReconstruction,
     ChunkDatasetImageQuantized,
+    ChunkDatasetJIT,
+    ChunkDatasetImage01,
+    ChunkDatasetMous,
+    ChunkDatasetMasked,
+    ChunkDatasetSubset,
+    ChunkDatasetCondition,
+    ChunkDatasetImageQuantizedCondition,
+    ChunkDatasetImageCondition,
 )
-from .datasplitter import Split, split_datasets, split_datasets_libribrain
+from .datasplitter import Split, split_datasets
 from .dataloaders import MixupDataLoader
 
 __all__ = [
@@ -13,9 +21,16 @@ __all__ = [
     "ChunkDatasetImage",
     "Split",
     "split_datasets",
-    "split_datasets_libribrain",
     "ChunkDatasetSensorPos",
     "ChunkDatasetReconstruction",
     "ChunkDatasetImageQuantized",
     "MixupDataLoader",
+    "ChunkDatasetJIT",
+    "ChunkDatasetImage01",
+    "ChunkDatasetMous",
+    "ChunkDatasetMasked",
+    "ChunkDatasetSubset",
+    "ChunkDatasetCondition",
+    "ChunkDatasetImageQuantizedCondition",
+    "ChunkDatasetImageCondition",
 ]

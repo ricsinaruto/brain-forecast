@@ -1,0 +1,18 @@
+input_size: 32
+patch_size: 16
+latent_dim: 256
+flow_layers: 4
+d_model: 512
+n_layers: 8
+n_mixtures: 256
+context_length: 399
+forecast_steps: 1
+
+attn_args:
+  d_model: 0
+  nheads: 16
+  dropout: 0.0
+  rope: true
+
+mlp_args:
+  d_model: 0

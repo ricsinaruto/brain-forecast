@@ -79,59 +79,34 @@ class MLPMoE(torch.nn.Module):
             nn.init.zeros_(self.mlp2_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_shape = x.shape
-        t = self.norm(x)
-        flattened = False
-        if t.ndim > 2:
-            # Flatten batch/time into token dimension to match reference math
-            t = t.reshape(-1, t.shape[-1])
-            x_residual = x
-            flattened = True
-        else:
-            x_residual = x
-        g = self.gate(t)
+        hidden = self.norm(x)
+        original_shape = hidden.shape
+        d_model = original_shape[-1]
+        hidden_flat = hidden.reshape(-1, d_model)
 
-        # TODO: this likely crashes on MPS
-        experts = torch.topk(g, k=self.experts_per_token, dim=-1, sorted=True)
-        expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
+        gate_logits = self.gate(hidden_flat)
+        experts = torch.topk(gate_logits, k=self.experts_per_token, dim=-1, sorted=True)
+        expert_weights = torch.nn.functional.softmax(experts.values, dim=-1)
         expert_indices = experts.indices
 
-        # MLP #1
-        mlp1_weight = self.mlp1_weight[expert_indices, ...]
-        mlp1_bias = self.mlp1_bias[expert_indices, ...]
-        # Shapes:
-        # - mlp1_weight: (tokens, experts_per_token, intermediate2, hidden)
-        # - t: (tokens, hidden)
-        # Compute per-token, per-expert linear: (B,E,C,H) @ (B,1,H,1) -> (B,E,C)
-        be, ee, c1, k = mlp1_weight.shape
-        t_expanded = t.unsqueeze(1).expand(-1, ee, -1)  # (B,E,H)
-        t = torch.bmm(
-            mlp1_weight.reshape(be * ee, c1, k),
-            t_expanded.reshape(be * ee, k, 1),
-        ).reshape(be, ee, c1)
+        mlp1_weight = self.mlp1_weight[expert_indices]
+        mlp1_bias = self.mlp1_bias[expert_indices]
+        mlp_input = hidden_flat.unsqueeze(1).unsqueeze(-1)
+        t = torch.matmul(mlp1_weight, mlp_input).squeeze(-1)
         t = t + mlp1_bias
         t = swiglu(t, limit=self.swiglu_limit)
 
-        # MLP #2
-        mlp2_weight = self.mlp2_weight[expert_indices, ...]
-        mlp2_bias = self.mlp2_bias[expert_indices, ...]
-        # Shapes after swiglu:
-        # - mlp2_weight: (B,E,hidden, intermediate)
-        # - t: (B,E,intermediate)
-        be2, ee2, c_out, k2 = mlp2_weight.shape
-        t = torch.bmm(
-            mlp2_weight.reshape(be2 * ee2, c_out, k2),
-            t.reshape(be2 * ee2, k2, 1),
-        ).reshape(be2, ee2, c_out)
+        mlp2_weight = self.mlp2_weight[expert_indices]
+        mlp2_bias = self.mlp2_bias[expert_indices]
+        t = torch.matmul(mlp2_weight, t.unsqueeze(-1)).squeeze(-1)
         if self.world_size > 1:
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t += mlp2_bias
+        t = t + mlp2_bias
 
-        # Weighted sum of experts
-        t = (t * expert_weights.unsqueeze(-1)).sum(dim=1)
-        if flattened:
-            t = t.reshape(*orig_shape[:-1], orig_shape[-1])
-        return x_residual + t
+        moe_output = torch.sum(t * expert_weights.unsqueeze(-1), dim=1)
+        moe_output = moe_output.view(*original_shape[:-1], d_model)
+
+        return x + moe_output
 
 
 class MLP(nn.Module):
@@ -153,14 +128,17 @@ class MLP(nn.Module):
         self.fc2 = nn.Linear(d_ff, d_model)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, residual: bool = True) -> Tensor:
         t = self.norm(x)
         t = self.fc1(t)
         t = self.act(t)
         t = self.drop(t)
         t = self.fc2(t)
-        x = x + self.drop(t)
-        return x
+
+        if residual:
+            return x + self.drop(t)
+
+        return self.drop(t)
 
 
 class TransformerBlock(torch.nn.Module):
@@ -184,6 +162,85 @@ class TransformerBlock(torch.nn.Module):
     def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
         x = self.attn(x, causal=causal)
         x = self.mlp(x)
+        return x
+
+
+class TransformerBlockCond(torch.nn.Module):
+    def __init__(
+        self,
+        attn_args: dict,
+        mlp_args: dict,
+        attn_type: str = "conditioned",
+        mlp_type: str = "standard",
+        n_cond_tok: int = 0,
+        n_cond_global: int = 0,
+        d_tok_emb: int = 0,
+        d_glob_emb: int = 0,
+    ):
+        super().__init__()
+        self.n_cond_tok = n_cond_tok
+        self.n_cond_global = n_cond_global
+
+        if n_cond_tok > 0:
+            self.emb_tok = nn.Embedding(n_cond_tok, d_tok_emb)
+            # map to FiLM params (per-token & global)
+            self.mod_tok = nn.Sequential(
+                nn.SiLU(), nn.Linear(d_tok_emb, 4 * attn_args["d_model"])
+            )  # γ1t,β1t,γ2t,β2t  (per token)
+
+        if n_cond_global > 0:
+            self.emb_glob = nn.Embedding(n_cond_global, d_glob_emb)
+            self.mod_glb = nn.Sequential(
+                nn.SiLU(), nn.Linear(d_glob_emb, 4 * attn_args["d_model"])
+            )  # γ1g,β1g,γ2g,β2g  (per sequence)
+
+        attn_args["d_tok_emb"] = d_tok_emb
+        attn_args["n_cond_tok"] = n_cond_tok
+        self.attn = AttentionBlock(attn_type=attn_type, attn_args=attn_args)
+
+        if mlp_type == "standard":
+            self.mlp = MLP(**mlp_args)
+        elif mlp_type == "moe":
+            self.mlp = MLPMoE(**mlp_args)
+        else:
+            raise ValueError(f"Invalid MLP type: {mlp_type}")
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        c_tok_ids: torch.Tensor = None,
+        c_global_ids: torch.Tensor = None,
+        causal: bool = False,
+    ) -> torch.Tensor:
+        # initialize FiLM params
+        g1t, b1t, g2t, b2t = 0, 0, 0, 0
+        g1g, b1g, g2g, b2g = 0, 0, 0, 0
+
+        # ---- FiLM params (sum of per-token + broadcasted global) ----
+        if self.n_cond_tok > 0:
+            mt = self.mod_tok(self.emb_tok(c_tok_ids))  # [B,S,4D]
+            g1t, b1t, g2t, b2t = mt.chunk(4, dim=-1)  # each [B,S,D]
+
+        if self.n_cond_global > 0:
+            mg = self.mod_glb(self.emb_glob(c_global_ids))  # [B,4D]
+            g1g, b1g, g2g, b2g = mg.chunk(4, dim=-1)  # each [B,D]
+            g1g = g1g.unsqueeze(1)
+            b1g = b1g.unsqueeze(1)
+            g2g = g2g.unsqueeze(1)
+            b2g = b2g.unsqueeze(1)
+
+        # broadcast global to sequence and sum
+        g1 = g1t + g1g
+        b1 = b1t + b1g
+        g2 = g2t + g2g
+        b2 = b2t + b2g
+
+        h = self.attn(x, causal=causal, residual=False, c_tok_ids=c_tok_ids)
+        x = x + h * (1 + g1) + b1
+
+        h = self.mlp(x, residual=False)
+        x = x + h * (1 + g2) + b2
+
         return x
 
 

@@ -1,0 +1,11 @@
+meta:
+  event_codes:
+preproc:
+  - set_channel_types: {EEG059: ecg, EEG057: eog, EEG058: eog}
+  - apply_gradient_compensation: {grade: 3}
+  - notch_filter:       {freqs: 50, phase: 'minimum'}
+  - filter:             {l_freq: 1, h_freq: 50, phase: 'minimum'}
+  - ica_raw:        {picks: 'mag', n_components: 64}
+  - ica_autoreject: {picks: 'mag', apply: True}
+  - resample:           {sfreq: 100}
+  

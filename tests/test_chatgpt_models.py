@@ -1,7 +1,6 @@
 import torch
 
 from ephys_gpt.models import ChronoFlowSSM, CK3D, LITRA, TACA, TASA3D
-from ephys_gpt.models.chronoflow import ChronoFlowConfig
 from ephys_gpt.utils.tests import assert_future_grad_zero
 
 
@@ -104,7 +103,7 @@ def test_grad_causality_chronoflow():
     # Random differentiable embeddings at block input
     x = torch.rand(B, T, C, H, W, requires_grad=True)
 
-    cfg = ChronoFlowConfig(
+    cfg = dict(
         in_channels=C,
         image_size=(H, W),
         spatial_levels=2,  # increase for higher res

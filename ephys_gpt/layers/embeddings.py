@@ -100,7 +100,7 @@ class Embeddings(Module):
     def forward(
         self,
         x: Tensor,
-        ids: Tensor,
+        ids: Optional[Tensor] = None,
         cond: Optional[Tensor] = None,
         sid: Optional[Tensor] = None,
     ) -> Tensor:
@@ -114,8 +114,9 @@ class Embeddings(Module):
         Returns:
             Output tensor of shape (B*C, T, E_q + E_ch + E_c + E_s)
         """
-        if ids is None:
-            ids = torch.arange(self.num_channels, device=x.device)
+        # if x is a tuple, unpack it
+        if isinstance(x, tuple) or isinstance(x, list):
+            x, cond = x
 
         _, channels, timesteps = x.shape[0], x.shape[1], x.shape[2]
 
@@ -126,6 +127,8 @@ class Embeddings(Module):
 
         # channel embeddings
         if self.channel_emb is not None:
+            if ids is None:
+                ids = torch.arange(self.num_channels, device=x.device)
             ch_ids = torch.arange(self.num_channels, device=x.device)
             ch_emb = self.channel_emb(ch_ids[ids])  # C x E_ch
             # repeat across batch and time:  B x T x C x E_ch

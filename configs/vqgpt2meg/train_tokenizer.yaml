@@ -1,0 +1,47 @@
+model_config: configs/vqgpt2meg/tokenizer.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/emu3visionvq
+resume_from: null
+
+model_name: Emu3VisionVQ
+loss_name: VQVAELoss
+
+datasplitter:
+  dataset_class: ChunkDatasetImage
+  dataset_root: /vol/data/datasets/Omega/preprocessed_cont
+  example_seconds: 1.0
+  overlap_seconds: 0.5
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 16
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+loss: {}
+
+lightning:
+  lr: 2.0e-4
+  weight_decay: 0.0
+  compile: true
+  log_samples: false
+  log_psd: false
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 2.0e-6
+    T_max: 100
+
+trainer:
+  max_epochs: 100
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 100
+  precision: 16-mixed
+  gradient_clip_val: 10.0

@@ -1,0 +1,30 @@
+tokenizer_path: /vol/data/trainings/emu3visionvq/lightning_logs/version_4/checkpoints/epoch-epoch=29.ckpt
+train_tokenizer: false
+
+trf_args:
+  vocab_size: 65536
+  num_layers: 12
+
+  attn_args:
+    d_model: 256
+    nheads: 8
+    dropout: 0.0
+    rope: true
+
+  mlp_args:
+    d_model: 256
+    # num_experts: 8
+    # experts_per_token: 1
+
+tok_args:
+  codebook_size: 65536
+  embed_dim: 256
+  z_channels: 256
+  double_z: False
+  in_channels: 1
+  out_channels: 1
+  temporal_downsample_factor: 2
+  ch: 128
+  ch_mult: [1, 2, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [3]

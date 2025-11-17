@@ -191,8 +191,8 @@ class BENDRContextualizer(nn.Module):
         self.dropout = dropout
         self.in_features = in_features
         self._transformer_dim = in_features * 3
-        attn_args["d_model"] = in_features * 3
-        mlp_args["d_model"] = in_features * 3
+        attn_args.setdefault("d_model", in_features * 3)
+        mlp_args.setdefault("d_model", in_features * 3)
 
         encoder = TransformerBlock(
             attn_args=attn_args,

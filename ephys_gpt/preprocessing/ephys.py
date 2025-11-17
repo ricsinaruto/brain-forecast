@@ -2,10 +2,16 @@
 
 import warnings
 from typing import Any
+from scipy import signal
+from pathlib import Path
 
 import mne
+
 import numpy as np
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
+from mne.io.constants import FIFF
+from mne.datasets import fetch_fsaverage
+from mne.minimum_norm import make_inverse_operator, apply_inverse_raw
 
 from ..utils.quantizers import mulaw
 
@@ -59,6 +65,10 @@ class Ephys(Preprocessing):
         self,
         *args,
         maxwell: bool = False,
+        source_space: bool = False,
+        sfreq: int = None,
+        get_fsaverage_data: bool = False,
+        fsaverage_dir: str = "/vol/data/datasets/mne_data",
         **kwargs,
     ) -> None:
         """
@@ -67,11 +77,18 @@ class Ephys(Preprocessing):
         """
         super().__init__(*args, **kwargs)
 
+        self.source_space = source_space
+        self.sfreq = sfreq
         if self.osl_config is None:
             if maxwell:
                 self.osl_config = self.default_config_maxwell
             else:
                 self.osl_config = self.default_config
+
+        if get_fsaverage_data:
+            fetch_fsaverage(Path(fsaverage_dir))
+
+        self.subjects_dir = Path(fsaverage_dir)
 
     def find_events_safe(
         self, data: dict[str, Any], min_duration: float = 0.005
@@ -103,6 +120,128 @@ class Ephys(Preprocessing):
 
         return data
 
+    def source_space_proj(
+        self,
+        raw,
+        subject: str,
+        parc: str = "aparc",  # Desikan-Killiany (68)
+        spacing: str = "ico5",  # ~10k verts/hemis
+        snr: float = 3.0,  # inverse regularization
+    ):
+        # Optional: fast artifact annotations (muscle bursts) — safe defaults
+        if False:
+            try:
+                ann_muscle, scores = mne.preprocessing.annotate_muscle_zscore(
+                    raw.copy().pick("meg"), threshold=4.0, min_length_good=0.1
+                )
+                raw.set_annotations(raw.annotations + ann_muscle)
+                raw = raw.copy().load_data().annotate_bad_segments(ann_muscle)
+            except Exception:
+                pass
+
+        sfreq = raw.info["sfreq"]
+
+        # --- extract fiducials + extra scalp points from info['dig'] ---
+        digs = raw.info.get("dig", None)
+        if not digs:
+            raise RuntimeError("No digitization points found in raw.info['dig'].")
+
+        nas = lpa = rpa = None
+        hsp = []
+        for d in digs:
+            if d["coord_frame"] != FIFF.FIFFV_COORD_HEAD:
+                continue
+            if d["kind"] == FIFF.FIFFV_POINT_CARDINAL:
+                if d["ident"] == FIFF.FIFFV_POINT_NASION:
+                    nas = d["r"]
+                elif d["ident"] == FIFF.FIFFV_POINT_LPA:
+                    lpa = d["r"]
+                elif d["ident"] == FIFF.FIFFV_POINT_RPA:
+                    rpa = d["r"]
+            elif d["kind"] == FIFF.FIFFV_POINT_EEG:
+                hsp.append(d["r"])
+        if nas is None or lpa is None or rpa is None:
+            raise RuntimeError("Missing fiducials (NAS/LPA/RPA) in digitization.")
+        hsp = np.array(hsp) if len(hsp) else None
+
+        montage = mne.channels.make_dig_montage(
+            nasion=nas, lpa=lpa, rpa=rpa, hsp=hsp, coord_frame="head"
+        )
+        raw.set_montage(montage, on_missing="ignore")
+
+        # --- coregister to fsaverage (MRI-less), conservative ICP ---
+        coreg = mne.coreg.Coregistration(
+            info=raw.info, subject="fsaverage", subjects_dir=self.subjects_dir
+        )
+        coreg.fit_fiducials()
+        if hsp is not None and len(hsp) >= 4:
+            coreg.fit_icp(n_iterations=10)  # light refinement only
+        trans = coreg.trans
+        mne.write_trans("ctf_to_fsaverage-trans.fif", trans, overwrite=True)
+
+        # --- forward & inverse on fsaverage ---
+        src = mne.setup_source_space(
+            "fsaverage", spacing=spacing, subjects_dir=self.subjects_dir, add_dist=False
+        )
+        bem_model = mne.make_bem_model(
+            "fsaverage", ico=4, conductivity=[0.3], subjects_dir=self.subjects_dir
+        )
+        bem = mne.make_bem_solution(bem_model)
+
+        # forward solution
+        fwd = mne.make_forward_solution(
+            raw.info, trans=trans, src=src, bem=bem, meg=True, eeg=False, mindist=5.0
+        )
+
+        # Use empty-room if you have it; otherwise ad-hoc is fine for rhythms
+        noise_cov = mne.make_ad_hoc_cov(raw.info)
+
+        inv = make_inverse_operator(raw.info, fwd, noise_cov, loose=0.2, depth=0.8)
+        lambda2 = 1.0 / (snr**2)
+        stc = apply_inverse_raw(
+            raw, inv, lambda2=lambda2, method="dSPM", pick_ori="normal"
+        )
+
+        # --- parcel time series (stable, low-dimensional) ---
+        labels = mne.read_labels_from_annot(
+            "fsaverage", parc=parc, subjects_dir=self.subjects_dir
+        )
+        # Drop labels that are not cortical parcels you actually want
+        labels = [
+            lab
+            for lab in labels
+            if "unknown" not in lab.name.lower()
+            and "corpuscallosum" not in lab.name.lower()
+        ]
+        ts = mne.extract_label_time_course(stc, labels, src, mode="mean_flip")
+
+        # Post-processing
+        # 1) detrend
+        ts = signal.detrend(ts, axis=1, type="linear")
+
+        # 2) resample
+        gcd = int(np.gcd(int(round(sfreq)), int(round(self.sfreq))))
+        up = int(round(self.sfreq / gcd))
+        down = int(round(sfreq / gcd))
+        ts = signal.resample_poly(ts, up, down, axis=1, padtype="line")
+
+        # fake pos_2d
+        pos_2d = np.array(
+            [[i / ts.shape[0], i / ts.shape[0]] for i in range(ts.shape[0])]
+        )
+
+        # assemble dict
+        data = {
+            "raw_array": ts,
+            "sfreq": self.sfreq,
+            "ch_names": [f"src{i}" for i in range(ts.shape[0])],
+            "ch_types": ["parcel"] * ts.shape[0],
+            "pos_2d": pos_2d,
+            "session": subject,
+            "decimate": int(sfreq / self.sfreq),
+        }
+        return data
+
     def extract_raw(self, fif_file: str, subject: str) -> dict[str, Any]:
         """Extract raw data and metadata from MNE Raw object with memory efficiency.
 
@@ -115,6 +254,9 @@ class Ephys(Preprocessing):
         """
         data = {}
         raw = mne.io.read_raw_fif(fif_file, preload=True)
+
+        if self.source_space:
+            return self.source_space_proj(raw, subject)
 
         # keep only the MEG channels
         keep_chn = [
@@ -164,14 +306,18 @@ class Ephys(Preprocessing):
         """
         cont_data = data["raw_array"]
 
-        scaler = RobustScaler(with_centering=True, with_scaling=True)
+        if method == "robust":
+            scaler = RobustScaler(with_centering=True, with_scaling=True)
+        else:
+            scaler = StandardScaler()
 
         # Fit on transposed data for channel-wise normalization
         cont_data = scaler.fit_transform(cont_data.T).T
 
         # Store normalization parameters
-        data["scaler_centers"] = scaler.center_
-        data["scaler_scales"] = scaler.scale_
+        if method == "robust":
+            data["scaler_centers"] = scaler.center_
+            data["scaler_scales"] = scaler.scale_
         data["raw_array"] = cont_data
 
         return data

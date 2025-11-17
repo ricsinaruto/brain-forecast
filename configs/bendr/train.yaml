@@ -1,0 +1,47 @@
+model_config: configs/bendr/model.yaml
+augmentations: null
+
+save_dir: /vol/data/trainings/bendr
+resume_from: null
+
+model_name: BENDRForecast
+loss_name: MSE
+
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_cont
+  example_seconds: 2
+  overlap_seconds: 1
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+loss: {}
+
+lightning:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  compile: true
+  log_samples: false
+  log_psd: False
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-5
+    T_max: 200
+
+trainer:
+  max_epochs: 200
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 10
+  precision: 16-mixed
+  gradient_clip_val: 1.0

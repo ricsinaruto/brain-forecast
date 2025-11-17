@@ -16,21 +16,11 @@ def mulaw_torch(x: torch.Tensor, mu: int = 255) -> tuple[torch.Tensor, torch.Ten
     Returns:
         Tuple of (quantized tensor, reconstructed tensor)
     """
-    # Select smallest integer dtype that can hold mu value
-    if mu <= 255:
-        dtype = torch.uint8
-    elif mu <= 65535:
-        dtype = torch.int16
-    elif mu <= 4294967295:
-        dtype = torch.int32
-    else:
-        dtype = torch.int64
-
     shape = x.shape
     x_flat = x.reshape(-1)
 
     # clip to -1, 1
-    x_flat = torch.clamp(x_flat, -1, 1)
+    x_flat = torch.clamp(x_flat, -0.999, 0.999)
 
     # Mu-law compression
     compressed = (
@@ -41,7 +31,7 @@ def mulaw_torch(x: torch.Tensor, mu: int = 255) -> tuple[torch.Tensor, torch.Ten
 
     # Quantize to integers in [0, mu]
     compressed = (compressed + 1) * 0.5 * mu + 0.5
-    digitized = compressed.round().to(dtype)
+    digitized = compressed.long()
 
     return digitized.reshape(shape)
 

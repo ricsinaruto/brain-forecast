@@ -12,10 +12,10 @@ class LitModel(pl.LightningModule):
         self,
         model_class: nn.Module,
         loss_class: nn.Module,
-        datasets: dict,
         model_cfg: dict,
         loss_cfg: dict,
         trainer_cfg: dict,
+        postprocessor=None,
     ) -> None:
         """
         Args:
@@ -30,14 +30,16 @@ class LitModel(pl.LightningModule):
         try:
             self.save_hyperparameters()
         except TypeError:
+            print("Could not save hyperparameters")
             pass
 
-        self.lr = trainer_cfg["lr"]
-        self.weight_decay = trainer_cfg["weight_decay"]
+        # keep a reference to the trainer config (for scheduler, etc.)
+        self.trainer_cfg = trainer_cfg
         self.log_samples = trainer_cfg.get("log_samples", False)
-        self.sfreq = trainer_cfg.get("sfreq", 200)
+        self._n_log_samples = trainer_cfg.get("n_log_samples", 3)
         self.log_psd = trainer_cfg.get("log_psd", False)
-        self.dataset = datasets.train
+        self.sfreq = trainer_cfg.get("sfreq", None)
+        self.postprocessor = postprocessor
 
         # Create model and loss instances
         self.model = model_class(**model_cfg)
@@ -48,8 +50,8 @@ class LitModel(pl.LightningModule):
 
         self.loss = loss_class(**loss_cfg)
 
-        # Number of random samples to log
-        self._n_log_samples = trainer_cfg.get("n_log_samples", 3)
+        self.test_predictions = []
+        self.test_targets = []
 
     def _log_random_samples(
         self,
@@ -92,6 +94,11 @@ class LitModel(pl.LightningModule):
             outputs = outputs[0]
         if isinstance(targets, tuple) or isinstance(targets, list):
             targets = targets[0]
+
+        if not torch.is_tensor(outputs):
+            # Some models (e.g., flow-based) return dictionaries instead of raw tensors.
+            # Skip logging in that case to avoid attribute errors.
+            return
 
         if self.logger is None:  # pragma: no cover – logger can be disabled
             return
@@ -158,6 +165,33 @@ class LitModel(pl.LightningModule):
         self.logger.experiment.add_figure(f"{stage}/sampled_psd", fig, self.global_step)
         plt.close(fig)
 
+    def _step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, stage: str
+    ):
+        inputs, targets = batch
+        logits = self.model(inputs)
+
+        if self.postprocessor is not None and torch.is_tensor(logits):
+            inputs, logits, targets = self.postprocessor(inputs, logits, targets)
+
+        loss = self.loss(logits, targets, model=self.model)
+
+        self.log(f"{stage}_loss", loss, prog_bar=True)
+        for name, metric in self.loss.metrics.items():
+            self.log(f"{stage}_{name}", metric(logits, targets), prog_bar=True)
+
+        # Log a few training samples once per epoch (first batch)
+        if self.log_samples and batch_idx == 0:
+            self._log_random_samples(inputs, logits, targets, stage=stage)
+
+        if self.log_psd and batch_idx == 0:
+            self._log_psd(inputs, stage=stage)
+
+        # log learning rate
+        self.log("lr", self.optimizers().param_groups[0]["lr"])
+
+        return loss
+
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """
         Args:
@@ -167,21 +201,7 @@ class LitModel(pl.LightningModule):
         Returns:
             Loss value
         """
-        inputs, targets = batch
-        logits = self.model(inputs)
-
-        if hasattr(self.dataset, "postprocess"):
-            inputs, logits, targets = self.dataset.postprocess(inputs, logits, targets)
-
-        loss = self.loss(logits, targets, model=self.model)
-        self.log("train_loss", loss, prog_bar=True)
-        for name, metric in self.loss.metrics.items():
-            self.log(f"train_{name}", metric(logits, targets), prog_bar=True)
-
-        # Log a few training samples once per epoch (first batch)
-        if self.log_samples and batch_idx == 0:
-            self._log_random_samples(inputs, logits, targets, stage="train")
-        return loss
+        return self._step(batch, batch_idx, stage="train")
 
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
@@ -194,25 +214,99 @@ class LitModel(pl.LightningModule):
         Returns:
             Loss value
         """
-        inputs, targets = batch
-        logits = self.model(inputs)
+        _ = self._step(batch, batch_idx, stage="val")
 
-        if hasattr(self.dataset, "postprocess"):
-            inputs, logits, targets = self.dataset.postprocess(inputs, logits, targets)
+    def test_step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
+    ) -> None:
+        targets = None
+        if isinstance(batch, tuple) or isinstance(batch, list):
+            batch, targets = batch
 
-        loss = self.loss(logits, targets, model=self.model)
-        self.log("val_loss", loss, prog_bar=True)
-        for name, metric in self.loss.metrics.items():
-            self.log(f"val_{name}", metric(logits, targets), prog_bar=True)
+        if isinstance(batch, tuple) or isinstance(batch, list):
+            batch = batch[0]
 
-        # Log a few validation samples once per validation epoch (first batch)
-        if self.log_samples and batch_idx == 0:
-            self._log_random_samples(inputs, logits, targets, stage="val")
+        if isinstance(targets, tuple) or isinstance(targets, list):
+            targets = targets[0]
 
-        if self.log_psd and batch_idx == 0:
-            self._log_psd(inputs, stage="val")
+        logits = self.model(batch)
+        probs = torch.softmax(logits, dim=1)
+
+        self.test_predictions.append(probs.cpu())
+
+        if targets is not None:
+            self.test_targets.append(targets.cpu())
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
-        return torch.optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.trainer_cfg["lr"],
+            weight_decay=self.trainer_cfg["weight_decay"],
         )
+
+        raw_sched_cfg = self.trainer_cfg.get("lr_scheduler", None)
+        # Work on a copy to avoid mutating hyperparameters
+        sched_cfg = dict(raw_sched_cfg) if raw_sched_cfg else None
+        if not sched_cfg:
+            return optimizer
+
+        # Extract PL-specific options
+        interval = sched_cfg.pop("interval", "epoch")
+        frequency = sched_cfg.pop("frequency", 1)
+        monitor = sched_cfg.pop("monitor", None)
+        class_name = sched_cfg.pop("class_name")
+
+        # Build the scheduler from torch.optim.lr_scheduler
+        try:
+            scheduler_cls = getattr(torch.optim.lr_scheduler, class_name)
+        except AttributeError as e:
+            raise ValueError(
+                f"Unknown lr_scheduler class '{class_name}' in torch.optim.lr_scheduler"
+            ) from e
+
+        # Remaining entries in sched_cfg are passed to the constructor
+        scheduler = scheduler_cls(optimizer, **sched_cfg)
+
+        # Compose the PL optimizer/scheduler config
+        lr_sched_dict = {
+            "scheduler": scheduler,
+            "interval": interval,  # unit of the scheduler's step
+            "frequency": frequency,  # how often to call
+        }
+        if monitor is not None:
+            lr_sched_dict["monitor"] = monitor
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": lr_sched_dict,
+        }
+
+
+class DatasetEpochCallback(pl.Callback):
+    """Calls a dataset-provided epoch hook at train epoch boundaries.
+
+    Supports datasets that expose either `set_epoch(int)` for cross-worker
+    coordination via shared state, or a simpler `on_epoch_start(epoch)` method.
+    """
+
+    def __init__(self, dataset) -> None:
+        super().__init__()
+        self.dataset = dataset
+
+    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        # 0-based current epoch index in PL
+        epoch = int(getattr(trainer, "current_epoch", 0))
+        hook = getattr(self.dataset, "set_epoch", None)
+        if callable(hook):
+            hook(epoch)
+        hook2 = getattr(self.dataset, "on_epoch_start", None)
+        if callable(hook2):
+            hook2(epoch)
+
+        # Optional: print a fingerprint for debugging multi-worker consistency
+        fp = getattr(self.dataset, "epoch_fingerprint", None)
+        if callable(fp):
+            try:
+                print(f"[Dataset] epoch={epoch} fingerprint={fp()}")
+            except Exception:
+                pass

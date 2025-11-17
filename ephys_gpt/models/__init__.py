@@ -4,7 +4,14 @@ from .baselines import (
     CNNMultivariateQuantized,
     CNNUnivariateQuantized,
 )
-from .gpt2meg import GPT2MEG, STGPT2MEG
+from .gpt2meg import (
+    GPT2MEG,
+    STGPT2MEG,
+    GPT2MEGMix,
+    VQGPT2MEG,
+    GPT2MEG_Trf,
+    GPT2MEG_Cond,
+)
 from .tokenizers.brainomnitokenizer import BrainOmniTokenizer as BrainTokenizer
 from .brainomni import BrainOmniSystem
 from .ntd import NTD
@@ -13,15 +20,18 @@ from .megformer import MEGFormer
 from .tokenizers.videogpttokenizer import VideoGPTTokenizer
 from .videogpt import VideoGPT
 from .tokenizers.emu3visionvq import Emu3VisionVQ, Emu3VisionVQGAN
-from .gpt2meg import VQGPT2MEG
 from .litra import LITRA
 from .taca import TACA
 from .chronoflow import ChronoFlowSSM
-from .latte import LatteAR
 from .wavenet import WavenetFullChannel, Wavenet3D
 from .ck3d import CK3D
 from .tasa3d import TASA3D
-from .cnnlstm import CNNLSTM
+from .cnnlstm import CNNLSTM, CNNLSTMSimple
+from .classifier import (
+    ClassifierContinuous,
+    ClassifierQuantized,
+    ClassifierQuantizedImage,
+)
 
 __all__ = [
     "CNNMultivariate",
@@ -43,10 +53,16 @@ __all__ = [
     "LITRA",
     "TACA",
     "ChronoFlowSSM",
-    "LatteAR",
     "WavenetFullChannel",
     "Wavenet3D",
     "CK3D",
     "TASA3D",
     "CNNLSTM",
+    "ClassifierContinuous",
+    "ClassifierQuantized",
+    "ClassifierQuantizedImage",
+    "GPT2MEGMix",
+    "GPT2MEG_Trf",
+    "CNNLSTMSimple",
+    "GPT2MEG_Cond",
 ]

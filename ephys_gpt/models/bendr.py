@@ -57,7 +57,7 @@ class BENDRForecast(nn.Module):
             encoder_h=encoder_h,
             enc_width=enc_width,
             enc_downsample=enc_downsample,
-            dropout=0.0,  # keep feature extractor deterministic
+            dropout=dropout,  # keep feature extractor deterministic
         )
 
         # ------------------------------------------------------------------
@@ -98,7 +98,9 @@ class BENDRForecast(nn.Module):
     #  Forward
     # ------------------------------------------------------------------
     def encode(self, x: torch.Tensor):
-        x, _, _ = x
+        if isinstance(x, tuple) or isinstance(x, list):
+            x = x[0]
+
         # Inputs use only the context window up to the last encoded step.
         inputs = x[..., : (self._encoded_len - 1) * self._ds_factor]
 

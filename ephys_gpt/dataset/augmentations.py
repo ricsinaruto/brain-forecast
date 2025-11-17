@@ -8,6 +8,7 @@ import torch.nn.functional as F
 __all__ = [
     "RandomTimeWarp",
     "RandomTimeMask",
+    "RandomTimeShift",
     "AdditiveNoise",
     "RandomSpatialWarp",
     "RandomNeighborChannelSwap",
@@ -157,10 +158,63 @@ class RandomTimeMask:
             s = int(torch.randint(0, max(T - length + 1, 1), (1,)).item())
             e = min(s + length, T)
             if x.ndim == 2:
-                x[:, s:e] = x.new_full((x.size(0), e - s), self.value)
+                x[:, s:e] = self.value
             else:
-                x[:, :, s:e] = x.new_full((x.size(0), x.size(1), e - s), self.value)
+                x[:, :, s:e] = self.value
         return x
+
+
+class RandomTimeShift:
+    """
+    Randomly shifts the signal along the time axis by up to ``max_shift`` steps.
+
+    Works with inputs shaped (C, T) or (H, W, T). For positive shifts the
+    content is delayed (shifted to the right); negative shifts advance it. By
+    default, vacated samples are filled with ``fill_value``.
+
+    Args:
+        max_shift: Maximum absolute integer shift (in samples).
+        fill_value: Value used to fill newly exposed samples when ``wrap=False``.
+        wrap: If True, performs a circular shift via ``torch.roll`` instead.
+        p: Probability of applying the augmentation.
+    """
+
+    def __init__(
+        self,
+        max_shift: int = 6,
+        fill_value: float = 0.0,
+        wrap: bool = True,
+        p: float = 1.0,
+    ) -> None:
+        self.max_shift = int(max_shift)
+        self.fill_value = float(fill_value)
+        self.wrap = bool(wrap)
+        self.p = float(p)
+
+    @torch.no_grad()
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if torch.rand(1).item() > self.p or self.max_shift <= 0:
+            return x
+
+        if x.ndim not in (2, 3):
+            return x
+
+        shift = (
+            int(torch.randint(0, 2 * self.max_shift + 1, ()).item()) - self.max_shift
+        )
+        if shift == 0:
+            return x
+
+        if self.wrap:
+            return torch.roll(x, shifts=shift, dims=-1)
+
+        out = x.new_full(x.shape, self.fill_value)
+        if shift > 0:
+            out[..., shift:] = x[..., :-shift]
+        else:
+            k = -shift
+            out[..., :-k] = x[..., k:]
+        return out
 
 
 class AdditiveNoise:

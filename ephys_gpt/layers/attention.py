@@ -165,6 +165,51 @@ def sdpa_math(
     return out
 
 
+class CondLogitBias(nn.Module):
+    def __init__(self, n_cond_tok: int, d_emb: int = 16, r: int = 8):
+        super().__init__()
+        self.emb = nn.Embedding(n_cond_tok, d_emb)
+        self.U = nn.Linear(d_emb, r, bias=False)
+        self.V = nn.Linear(d_emb, r, bias=False)
+
+    def forward(self, c_q: torch.LongTensor, c_k: torch.LongTensor):
+        # c_q, c_k: [B,S] ids for query and key positions (same tensor in self-attn)
+        # returns [B,S,S] bias to add to attention logits
+        e_q = self.emb(c_q)  # [B,S,d_emb]
+        e_k = self.emb(c_k)  # [B,S,d_emb]
+        uq = self.U(e_q)  # [B,S,r]
+        vk = self.V(e_k)  # [B,S,r]
+        bias = torch.bmm(uq, vk.transpose(1, 2))
+        return bias
+
+
+# ---- Global KV-prefix generator from global condition ----
+class GlobalKVPrefix(nn.Module):
+    def __init__(
+        self, n_cond_global: int, d_model: int, n_heads: int, n_prefix: int = 4
+    ):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_prefix = n_prefix
+        self.d_head = d_model // n_heads
+        self.emb = nn.Embedding(n_cond_global, d_model)
+        # produce K and V prefixes per head
+        self.proj = nn.Sequential(
+            nn.SiLU(), nn.Linear(d_model, 2 * n_heads * n_prefix * self.d_head)
+        )
+
+    def forward(self, c_global_ids: torch.LongTensor):
+        # c_global_ids: [B] (one id per sequence in batch)
+        g = self.emb(c_global_ids)  # [B,d_model]
+        kv = self.proj(g)  # [B, 2*H*P*d_head]
+        k_pref, v_pref = kv.chunk(2, dim=-1)
+        B = g.size(0)
+        H, P, Dh = self.n_heads, self.n_prefix, self.d_head
+        k_pref = k_pref.view(B, H, P, Dh)  # [B,H,P,Dh]
+        v_pref = v_pref.view(B, H, P, Dh)
+        return k_pref, v_pref
+
+
 class MultiHeadAttentionGPTOSS(torch.nn.Module):
     def __init__(
         self,
@@ -317,6 +362,7 @@ class MultiHeadAttention(nn.Module):
         bias: bool = True,
         rope: bool = False,
         rope_base: float = 10000.0,
+        skip_input_proj: bool = False,
     ):
         super().__init__()
 
@@ -331,18 +377,25 @@ class MultiHeadAttention(nn.Module):
         self.nheads = nheads
         self.dropout = dropout
         self.drop = nn.Dropout(dropout)
+        self.skip_input_proj = skip_input_proj
+        self.bias = bias
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
-        if self._qkv_same_embed_dim:
-            self.packed_proj = nn.Linear(E_q, d_model * 3, bias=bias)
+        if self.skip_input_proj:
+            self.packed_proj = None
+            self.q_proj = None
+            self.k_proj = None
+            self.v_proj = None
         else:
-            self.q_proj = nn.Linear(E_q, d_model, bias=bias)
-            self.k_proj = nn.Linear(E_k, d_model, bias=bias)
-            self.v_proj = nn.Linear(E_v, d_model, bias=bias)
+            if self._qkv_same_embed_dim:
+                self.packed_proj = nn.Linear(E_q, d_model * 3, bias=bias)
+            else:
+                self.q_proj = nn.Linear(E_q, d_model, bias=bias)
+                self.k_proj = nn.Linear(E_k, d_model, bias=bias)
+                self.v_proj = nn.Linear(E_v, d_model, bias=bias)
         E_out = E_q
         self.out_proj = nn.Linear(d_model, E_out, bias=bias)
         assert d_model % nheads == 0, "Embedding dim is not divisible by nheads"
         self.E_head = d_model // nheads
-        self.bias = bias
 
         self.rope = rope
         self.register_buffer(
@@ -351,12 +404,55 @@ class MultiHeadAttention(nn.Module):
             persistent=False,
         )
 
+    def qkv_projection(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+    ) -> torch.Tensor:
+        # Step 1. Apply input projection unless externally supplied
+        if self.skip_input_proj:
+            query_proj, key_proj, value_proj = query, key, value
+        else:
+            if self._qkv_same_embed_dim:
+                if query is key and key is value:
+                    result = self.packed_proj(query)
+                    query_proj, key_proj, value_proj = torch.chunk(result, 3, dim=-1)
+                else:
+                    q_weight, k_weight, v_weight = torch.chunk(
+                        self.packed_proj.weight, 3, dim=0
+                    )
+                    if self.bias:
+                        q_bias, k_bias, v_bias = torch.chunk(
+                            self.packed_proj.bias, 3, dim=0
+                        )
+                    else:
+                        q_bias, k_bias, v_bias = None, None, None
+                    query_proj, key_proj, value_proj = (
+                        F.linear(query, q_weight, q_bias),
+                        F.linear(key, k_weight, k_bias),
+                        F.linear(value, v_weight, v_bias),
+                    )
+            else:
+                query_proj = self.q_proj(query)
+                key_proj = self.k_proj(key)
+                value_proj = self.v_proj(value)
+
+        # Step 2. Split heads and prepare for SDPA
+        # reshape query, key, value to separate by head
+        # (N, L_t, E_total) -> (N, L_t, nheads, E_head) -> (N, nheads, L_t, E_head)
+        query = query_proj.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        key = key_proj.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        value = value_proj.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+
+        return query, key, value
+
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         causal: bool = False,
+        attn_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Forward pass; runs the following process:
@@ -376,48 +472,76 @@ class MultiHeadAttention(nn.Module):
         Returns:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
-        B, T, _ = query.shape
-        # Step 1. Apply input projection
-        if self._qkv_same_embed_dim:
-            if query is key and key is value:
-                result = self.packed_proj(query)
-                query, key, value = torch.chunk(result, 3, dim=-1)
-            else:
-                q_weight, k_weight, v_weight = torch.chunk(
-                    self.packed_proj.weight, 3, dim=0
-                )
-                if self.bias:
-                    q_bias, k_bias, v_bias = torch.chunk(
-                        self.packed_proj.bias, 3, dim=0
-                    )
-                else:
-                    q_bias, k_bias, v_bias = None, None, None
-                query, key, value = (
-                    F.linear(query, q_weight, q_bias),
-                    F.linear(key, k_weight, k_bias),
-                    F.linear(value, v_weight, v_bias),
-                )
+        query, key, value = self.qkv_projection(query, key, value)
 
-        else:
-            query = self.q_proj(query)
-            key = self.k_proj(key)
-            value = self.v_proj(value)
-
-        # Step 2. Split heads and prepare for SDPA
-        # reshape query, key, value to separate by head
-        # (N, L_t, E_total) -> (N, L_t, nheads, E_head) -> (N, nheads, L_t, E_head)
-        query = query.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
-        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
-        key = key.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
-        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
-        value = value.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        _, _, T, _ = query.shape
 
         if self.rope and self.inv_freq_t.numel() > 0:
             query, key = apply_rope_1d(query, key, self.inv_freq_t, pos_start=0, L=T)
 
         # Step 3. Run SDPA
         # (N, nheads, L_t, E_head)
-        attn_output = sdpa(query, key, value, self.dropout, causal=causal)
+        dropout = self.dropout if self.training else 0.0
+        attn_output = sdpa(
+            query, key, value, dropout, causal=causal, attn_mask=attn_mask
+        )
+        # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
+        attn_output = attn_output.transpose(1, 2).flatten(-2)
+
+        # Step 4. Apply output projection
+        # (N, L_t, E_total) -> (N, L_t, E_out)
+        attn_output = self.out_proj(attn_output)
+
+        return self.drop(attn_output)
+
+
+class MultiHeadAttentionCond(MultiHeadAttention):
+    def __init__(
+        self,
+        *args,
+        n_cond_tok: int = 0,
+        d_tok_emb: int = 0,
+        bias_rank: int = 8,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.n_cond_tok = n_cond_tok
+        if n_cond_tok > 0:
+            self.cond_bias = CondLogitBias(n_cond_tok, d_emb=d_tok_emb, r=bias_rank)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        c_tok_ids: torch.Tensor = None,
+        causal: bool = False,
+    ) -> torch.Tensor:
+        dropout = self.dropout if self.training else 0.0
+        q, k, v = self.qkv_projection(query, key, value)
+
+        _, _, S, Dh = q.shape
+
+        if self.rope and self.inv_freq_t.numel() > 0:
+            q, k = apply_rope_1d(q, k, self.inv_freq_t, pos_start=0, L=S)
+
+        logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(Dh)  # [B,H,S,S]
+
+        if causal:
+            attn_mask = torch.full((S, S), float('-inf'), device=q.device)
+            attn_mask = torch.triu(attn_mask, diagonal=1)  # -inf above diagonal
+            logits = logits + attn_mask
+
+        # Per-token logit bias (shared across heads)
+        # Compute bias only for the token-token block and pad for prefixes
+        if self.n_cond_tok > 0:
+            bias_tt = self.cond_bias(c_tok_ids, c_tok_ids)  # [B,S,S]
+            logits = logits + bias_tt.unsqueeze(1)  # broadcast to heads
+
+        attn_weight = torch.softmax(logits, dim=-1)
+        attn_weight = torch.dropout(attn_weight, dropout, train=self.training)
+        attn_output = torch.matmul(attn_weight, v)  # [B,H,S,Dh]
+
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -435,8 +559,11 @@ class AttentionBlock(nn.Module):
         attn_type: str = "standard",
     ):
         super().__init__()
+        self.attn_type = attn_type
         if attn_type == "standard":
             self.attn = MultiHeadAttention(**attn_args)
+        elif attn_type == "conditioned":
+            self.attn = MultiHeadAttentionCond(**attn_args)
         elif attn_type == "gpt_oss":
             self.attn = MultiHeadAttentionGPTOSS(**attn_args)
         else:
@@ -444,7 +571,21 @@ class AttentionBlock(nn.Module):
         self.dropout = nn.Dropout(attn_args.get("dropout", 0.0))
         self.norm = nn.RMSNorm(attn_args["d_model"])
 
-    def forward(self, x: torch.Tensor, causal: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        causal: bool = False,
+        residual: bool = True,
+        c_tok_ids: torch.Tensor = None,
+    ):
         t = self.norm(x)
-        t = self.attn(t, t, t, causal=causal)
-        return x + t
+
+        if self.attn_type == "conditioned":
+            t = self.attn(t, t, t, causal=causal, c_tok_ids=c_tok_ids)
+        else:
+            t = self.attn(t, t, t, causal=causal)
+
+        if residual:
+            return x + t
+
+        return t

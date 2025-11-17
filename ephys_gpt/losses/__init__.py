@@ -1,6 +1,19 @@
-from .classification import CrossEntropy, CrossEntropyWithCodes
+from .classification import (
+    CrossEntropy,
+    CrossEntropyWithCodes,
+    CrossEntropyWeighted,
+    CrossEntropyBalanced,
+    CrossEntropyMasked,
+)
 from .diffusion import NTDLoss
-from .reconstruction import MSE, BrainTokenizerLoss, VQNSPLoss, NLL, VQVAELoss
+from .reconstruction import (
+    MSE,
+    BrainTokenizerLoss,
+    VQNSPLoss,
+    NLL,
+    VQVAELoss,
+    ChronoFlowLoss,
+)
 
 __all__ = [
     "CrossEntropy",
@@ -11,4 +24,8 @@ __all__ = [
     "VQNSPLoss",
     "NLL",
     "VQVAELoss",
+    "CrossEntropyWeighted",
+    "ChronoFlowLoss",
+    "CrossEntropyBalanced",
+    "CrossEntropyMasked",
 ]

@@ -1,36 +1,32 @@
-import os
-import numpy as np
 import torch
 
+from ephys_gpt.dataset import datasplitter as datasplitter_module
 from ephys_gpt.dataset.datasets import (
     ChunkDataset,
     ChunkDatasetForecastCont,
     ChunkDatasetImage,
 )
-from ephys_gpt.dataset.datasplitter import build_indices
-
-
-def _make_dummy_session(root: str, session: str, *, C: int = 8, T: int = 64):
-    os.makedirs(os.path.join(root, session), exist_ok=True)
-    data = {
-        "data": np.random.randn(C, T).astype(np.float32),
-        "ch_names": [f"ch{i:03d}" for i in range(C)],
-        "pos_2d": [(float(i % 4), float(i // 4)) for i in range(C)],
-        "sfreq": 200,
-    }
-    np.save(os.path.join(root, session, "0.npy"), data)
+from ephys_gpt.dataset.datasplitter import build_indices, split_datasets
+from ephys_gpt.utils.tests import make_dummy_session
 
 
 def test_chunk_dataset_discrete_shift(tmp_path):
     root = tmp_path / "omega"
-    _make_dummy_session(str(root), "sub-001", C=6, T=32)
+    make_dummy_session(str(root), "sub-001", C=272, T=32)
 
     indices, example_len, _, ch_names, pos_2d, sfreq = build_indices(
         str(root), example_len=0.16, overlap=0.0
     )
 
     # Use a short fixed window (example_len=0 leads to full-length windows here)
-    ds = ChunkDataset(str(root), indices, example_len, ch_names, pos_2d, sfreq)
+    ds = ChunkDataset(
+        str(root),
+        indices=indices,
+        length=example_len,
+        ch_names=ch_names,
+        pos_2d=pos_2d,
+        sfreq=sfreq,
+    )
 
     x_in, x_tgt = ds[0]
     assert x_in.dtype == torch.long
@@ -43,14 +39,19 @@ def test_chunk_dataset_discrete_shift(tmp_path):
 
 def test_chunk_dataset_continuous_shift(tmp_path):
     root = tmp_path / "omega"
-    _make_dummy_session(str(root), "sub-001", C=5, T=40)
+    make_dummy_session(str(root), "sub-001", C=272, T=40)
 
     indices, example_len, _, ch_names, pos_2d, sfreq = build_indices(
         str(root), example_len=0.2, overlap=0.0
     )
 
     ds = ChunkDatasetForecastCont(
-        str(root), indices, example_len, ch_names, pos_2d, sfreq
+        str(root),
+        indices=indices,
+        length=example_len,
+        ch_names=ch_names,
+        pos_2d=pos_2d,
+        sfreq=sfreq,
     )
     x_in, x_tgt = ds[0]
     assert x_in.dtype == torch.float32
@@ -60,14 +61,20 @@ def test_chunk_dataset_continuous_shift(tmp_path):
 
 def test_chunk_dataset_image_returns_forecast_pairs(tmp_path):
     root = tmp_path / "omega"
-    _make_dummy_session(str(root), "sub-001", C=9, T=20)
+    make_dummy_session(str(root), "sub-001", C=272, T=20)
 
     indices, example_len, _, ch_names, pos_2d, sfreq = build_indices(
         str(root), example_len=0.1, overlap=0.0
     )
 
     ds_img = ChunkDatasetImage(
-        str(root), indices, example_len, ch_names, pos_2d, sfreq, image_size=16
+        str(root),
+        indices=indices,
+        length=example_len,
+        ch_names=ch_names,
+        pos_2d=pos_2d,
+        sfreq=sfreq,
+        image_size=32,
     )
     img_in, img_tgt = ds_img[0]
     # Expect 3D images [H,W,T] and one-step shift across time
@@ -75,3 +82,244 @@ def test_chunk_dataset_image_returns_forecast_pairs(tmp_path):
     assert img_in.shape[:2] == img_tgt.shape[:2]
     # Current implementation returns identical tensors (reconstruction/data pairing)
     assert img_in.shape[-1] == img_tgt.shape[-1]
+
+
+def test_split_datasets_merges_multiple_roots(tmp_path):
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+
+    # Dataset A: four channels arranged on a square
+    a_pos = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+    a_names = [f"a{i}" for i in range(4)]
+    make_dummy_session(
+        str(root_a),
+        "sub-001",
+        C=4,
+        T=40,
+        pos_2d=a_pos,
+        ch_names=a_names,
+        ch_types=[3012] * 4,
+    )
+
+    # Dataset B: shares two positions but introduces a new sensor at (2, 0)
+    b_pos = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]
+    b_names = [f"b{i}" for i in range(3)]
+    make_dummy_session(
+        str(root_b),
+        "sub-101",
+        C=3,
+        T=40,
+        pos_2d=b_pos,
+        ch_names=b_names,
+        ch_types=[3012] * 3,
+    )
+
+    split = split_datasets(
+        [str(root_a), str(root_b)],
+        example_seconds=0.1,
+        overlap_seconds=0.0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        seed=0,
+        dataset_class="ChunkDataset",
+    )
+
+    train_ds = split.train
+    assert train_ds.num_channels == 5  # four from A plus one new from B
+
+    key_a = root_a.name
+    key_b = root_b.name
+
+    present_a = set(train_ds.session_indices[(key_a, "sub-001")].tolist())
+    present_b = set(train_ds.session_indices[(key_b, "sub-101")].tolist())
+
+    idx_a = next(i for i, entry in enumerate(train_ds.indices) if entry[0] == key_a)
+    idx_b = next(i for i, entry in enumerate(train_ds.indices) if entry[0] == key_b)
+
+    x_a, _ = train_ds[idx_a]
+    x_b, _ = train_ds[idx_b]
+
+    missing_a = sorted(set(range(train_ds.num_channels)) - present_a)
+    missing_b = sorted(set(range(train_ds.num_channels)) - present_b)
+
+    assert missing_a and torch.all(x_a[missing_a] == 0)
+    assert missing_b and torch.all(x_b[missing_b] == 0)
+
+    # Ensure present channels carry signal (non-zero with high probability)
+    assert torch.any(x_a[list(present_a)] != 0)
+    assert torch.any(x_b[list(present_b)] != 0)
+
+
+def test_session_with_missing_channels_is_zero_padded(tmp_path):
+    root = tmp_path / "omega"
+
+    # Session 1 with complete set of sensors
+    full_pos = [(float(i), 0.0) for i in range(3)]
+    make_dummy_session(
+        str(root),
+        "sub-001",
+        C=3,
+        T=32,
+        pos_2d=full_pos,
+        ch_names=["c0", "c1", "c2"],
+    )
+
+    # Session 2 missing the final channel
+    partial_pos = full_pos[:2]
+    make_dummy_session(
+        str(root),
+        "sub-002",
+        C=2,
+        T=32,
+        pos_2d=partial_pos,
+        ch_names=["c0_alt", "c1_alt"],
+    )
+
+    split = split_datasets(
+        str(root),
+        example_seconds=0.08,
+        overlap_seconds=0.0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        seed=0,
+        dataset_class="ChunkDataset",
+    )
+
+    train_ds = split.train
+    assert train_ds.num_channels == 3
+
+    key = next(entry[0] for entry in train_ds.indices if entry[1] == "sub-002")
+    partial_present = set(train_ds.session_indices[(key, "sub-002")].tolist())
+    missing = sorted(set(range(train_ds.num_channels)) - partial_present)
+
+    idx_partial = next(
+        i for i, entry in enumerate(train_ds.indices) if entry[1] == "sub-002"
+    )
+    x_partial, _ = train_ds[idx_partial]
+
+    assert missing and torch.all(x_partial[missing] == 0)
+    assert torch.any(x_partial[list(partial_present)] != 0)
+
+
+def test_split_datasets_uses_cache_to_skip_chunk_loads(tmp_path, monkeypatch):
+    root = tmp_path / "omega"
+
+    # Two chunks so that metadata includes both full and tail lengths
+    make_dummy_session(
+        str(root),
+        "sub-001",
+        C=3,
+        T=40,
+        chunk_idx=0,
+    )
+    make_dummy_session(
+        str(root),
+        "sub-001",
+        C=3,
+        T=20,
+        chunk_idx=1,
+    )
+
+    cache_dir = tmp_path / "cache"
+
+    split_datasets(
+        str(root),
+        example_seconds=0.05,
+        overlap_seconds=0.0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        seed=0,
+        dataset_class="ChunkDataset",
+        cache_dir=str(cache_dir),
+    )
+
+    def fail_on_load(path):
+        raise AssertionError(f"Unexpected chunk load for {path}")
+
+    monkeypatch.setattr(datasplitter_module, "_load_chunk", fail_on_load)
+
+    split_datasets(
+        str(root),
+        example_seconds=0.05,
+        overlap_seconds=0.0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        seed=0,
+        dataset_class="ChunkDataset",
+        cache_dir=str(cache_dir),
+    )
+
+
+def test_chunk_dataset_image_handles_multi_dataset_layout(tmp_path):
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+
+    # Dataset A with three sensors forming an L-shape
+    make_dummy_session(
+        str(root_a),
+        "sub-001",
+        C=3,
+        T=32,
+        pos_2d=[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+        ch_names=["a0", "a1", "a2"],
+    )
+
+    # Dataset B missing sensor a2 and introducing a new one
+    make_dummy_session(
+        str(root_b),
+        "sub-101",
+        C=3,
+        T=32,
+        pos_2d=[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)],
+        ch_names=["b0", "b1", "b2"],
+    )
+
+    split = split_datasets(
+        [str(root_a), str(root_b)],
+        example_seconds=0.08,
+        overlap_seconds=0.0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        seed=0,
+        dataset_class="ChunkDatasetImage",
+        dataset_kwargs={"image_size": 16},
+    )
+
+    ds = split.train
+    row_idx = ds.row_idx
+    col_idx = ds.col_idx
+
+    key_a = root_a.name
+    key_b = root_b.name
+
+    idx_a = next(i for i, entry in enumerate(ds.indices) if entry[0] == key_a)
+    idx_b = next(i for i, entry in enumerate(ds.indices) if entry[0] == key_b)
+
+    img_a, _ = ds[idx_a]
+    img_b, _ = ds[idx_b]
+
+    present_a = set(ds.session_indices[(key_a, "sub-001")].tolist())
+    present_b = set(ds.session_indices[(key_b, "sub-101")].tolist())
+
+    missing_a = sorted(set(range(ds.num_channels)) - present_a)
+    missing_b = sorted(set(range(ds.num_channels)) - present_b)
+
+    # Missing channels remain zero-valued across the entire image sequence
+    for ch_idx in missing_a:
+        r = int(row_idx[ch_idx])
+        c = int(col_idx[ch_idx])
+        assert torch.count_nonzero(img_a[r, c, :]) == 0
+    for ch_idx in missing_b:
+        r = int(row_idx[ch_idx])
+        c = int(col_idx[ch_idx])
+        assert torch.count_nonzero(img_b[r, c, :]) == 0
+
+    # Present channels carry non-zero signals in their assigned pixels
+    for ch_idx in present_a:
+        r = int(row_idx[ch_idx])
+        c = int(col_idx[ch_idx])
+        assert torch.count_nonzero(img_a[r, c, :]) > 0
+    for ch_idx in present_b:
+        r = int(row_idx[ch_idx])
+        c = int(col_idx[ch_idx])
+        assert torch.count_nonzero(img_b[r, c, :]) > 0

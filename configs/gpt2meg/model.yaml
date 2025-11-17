@@ -1,20 +1,20 @@
 num_channels: 272
 
 embedding_args:
-  quant_emb: 128
-  channel_emb: 128
+  channel_emb: 384
+  quant_emb: 384
 
 gpt2_config:
-  vocab_size: 256
+  vocab_size: 512
   n_positions: 400
-  n_embd: 128
-  n_layer: 8
-  n_head: 8
+  n_embd: 384
+  n_layer: 12
+  n_head: 16
   resid_pdrop: 0.0
   embd_pdrop: 0.0
   attn_pdrop: 0.0
-  bos_token_id: 255
-  eos_token_id: 255
+  bos_token_id: 511
+  eos_token_id: 511
   name_or_path: null
   use_cache: false
-  _attn_implementation: "flash_attention_3"
+  # _attn_implementation: "flash_attention_3"

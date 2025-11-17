@@ -1,0 +1,47 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/gpt2meg_trf/model_mous_small.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/mous/2sub/1to50hz_causal/gpt2meg_trf/p80
+resume_from: null
+
+model_name: GPT2MEG_Trf
+loss_name: CrossEntropy
+eval_class: EvalQuant
+
+datasplitter:
+  dataset_class: ChunkDatasetCondition
+  dataset_root: "/vol/data/datasets/MOUS/preprocessed_1to50hz_causal"
+  example_seconds: 0.5
+  overlap_seconds: 0.0
+  val_ratio: 0.0
+  test_ratio: 0.33
+  dataset_kwargs:
+    fill_value: 127
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: true
+  use_test_dataset: false
+  future_steps: 10
+  unroll_steps: 1
+  gen_seconds: 3600
+  gen_sampling: top_p
+  channel_shape: [273]
+  num_channels: 273
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/mous/2sub/1to50hz/gpt2meg_trf/lightning_logs/version_6/checkpoints/best-checkpoint.ckpt
