@@ -1,0 +1,15 @@
+in_channels: 306
+red_channels: 64
+num_classes: 39
+
+channel_dropout_p: 0.33
+dropout: 0.2
+
+hidden_channels: [128, 128]
+kernels: [3, 3]
+strides: [1, 2]
+
+lstm_num_layers: 3
+attention: false
+
+

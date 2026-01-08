@@ -1,0 +1,49 @@
+dataloader:
+  batch_size: 1
+  num_workers: 0
+  persistent_workers: false
+  pin_memory: true
+  prefetch_factor: null
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_cont
+  example_seconds: 32
+  overlap_seconds: 15
+  test_ratio: 0.1
+  val_ratio: 0.1
+eval_runner:
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz_ss/flatgpt/brainomni/FlatGPTRVQ/logs/version_1/checkpoints/last-checkpoint-epoch00040.ckpt
+  enabled: true
+  epoch: 40
+  generate:
+    enabled: true
+    kv_overlap: 8
+    seconds: 64
+    top_p: 0.8
+  max_batches: 10
+  modal_app: ephys-gpt
+  modal_function: runevals
+  num_examples: 0
+  step: 28
+  use_modal: true
+  version: 3
+lightning:
+  lr: 0.0002
+  lr_scheduler:
+    T_max: 100
+    class_name: CosineAnnealingLR
+    eta_min: 2.0e-05
+  weight_decay: 0.1
+loss_name: CrossEntropyWithCodes
+model_config: configs/flatgpt/brainomni/model_rvq.yaml
+model_name: FlatGPTRVQ
+resume_from: null
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/flatgpt/brainomni/FlatGPTRVQ
+trainer:
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  checkpoint_cadence_epochs: 1
+  default_root_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/flatgpt/brainomni/FlatGPTRVQ
+  gradient_clip_val: 1.0
+  max_epochs: 100
+  precision: bf16-mixed

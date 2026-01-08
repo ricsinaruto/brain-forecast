@@ -7,8 +7,7 @@ class Omega(Ephys):
     def load(self) -> dict[str, Any]:
         """Load Omega dataset and generate file and subject names.
 
-        Returns:
-            dict[str, Any]: Dictionary containing the file and subject names.
+        Returns:     dict[str, Any]: Dictionary containing the file and subject names.
         """
 
         files = []

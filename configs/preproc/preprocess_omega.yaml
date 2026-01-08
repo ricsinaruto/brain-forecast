@@ -4,17 +4,18 @@
 # Root directory containing raw dataset
 data_path: "/mnt/datasets/raw/Omega"
 stage1_path: "/mnt/datasets/preprocessed1to50hz/Omega"
-save_path: "/mnt/datasets/preprocessed1to50hz/Omega"
-log_dir: "/vol/data/datasets/Omega/preprocessed1to50hz"
+save_path: "/mnt/datasets/preprocessed1to50hz_cont/Omega"
+log_dir: "/vol/data/datasets/omega/full/1to50hz_cont"
 delete_fif: false
 maxwell: false
-skip_done: true
+skip_done: false
 
 # Number of dask workers used by osl-ephys
 n_workers: 16
 
 # Length of each saved chunk in seconds
-chunk_seconds: 60
+chunk_seconds: 300
+bad_handling: zero
 
 # Optional path to a custom OSL preprocessing config
 osl_config: configs/preproc/osl_omega.yaml
@@ -25,5 +26,3 @@ preproc_config:
     method: "robust"
   clip:
     std_factor: 5
-  mulaw_quantize:
-    n_bits: 8

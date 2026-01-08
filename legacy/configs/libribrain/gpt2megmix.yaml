@@ -1,0 +1,24 @@
+base_model_name: GPT2MEGMix
+num_classes: 39
+num_channels: 306
+d_model: 2
+red_dim: 2
+
+model_args:
+  num_channels: 306
+  vocab_size: 512
+  d_model: 612
+  num_layers: 12
+  channel_dropout_p: 0.33
+  quant_emb: 2
+  attn_type: standard
+  mlp_type: standard
+
+  attn_args:
+    d_model: 612
+    nheads: 12
+    dropout: 0.2
+    rope: true
+
+  mlp_args:
+    d_model: 612

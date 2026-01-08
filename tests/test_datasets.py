@@ -1,13 +1,16 @@
 import torch
+import numpy as np
 
 from ephys_gpt.dataset import datasplitter as datasplitter_module
 from ephys_gpt.dataset.datasets import (
     ChunkDataset,
     ChunkDatasetForecastCont,
-    ChunkDatasetImage,
+    ChunkDatasetImageReconstruction,
+    ChunkDatasetInterpolatedImage,
 )
 from ephys_gpt.dataset.datasplitter import build_indices, split_datasets
-from ephys_gpt.utils.tests import make_dummy_session
+from models.utils import make_dummy_session
+from ephys_gpt.utils.image_interpolation import compute_layout_indices
 
 
 def test_chunk_dataset_discrete_shift(tmp_path):
@@ -67,7 +70,7 @@ def test_chunk_dataset_image_returns_forecast_pairs(tmp_path):
         str(root), example_len=0.1, overlap=0.0
     )
 
-    ds_img = ChunkDatasetImage(
+    ds_img = ChunkDatasetImageReconstruction(
         str(root),
         indices=indices,
         length=example_len,
@@ -82,6 +85,43 @@ def test_chunk_dataset_image_returns_forecast_pairs(tmp_path):
     assert img_in.shape[:2] == img_tgt.shape[:2]
     # Current implementation returns identical tensors (reconstruction/data pairing)
     assert img_in.shape[-1] == img_tgt.shape[-1]
+
+
+def test_chunk_dataset_interpolated_image_dense_frames(tmp_path):
+    root = tmp_path / "omega"
+    data = np.zeros((4, 6), dtype=np.float32)
+    data[0] = 1.0  # single active channel to make the peak location clear
+    pos_2d = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+
+    make_dummy_session(str(root), "sub-001", data=data, pos_2d=pos_2d)
+
+    indices, example_len, _, ch_names, pos, sfreq = build_indices(
+        str(root), example_len=0.03, overlap=0.0
+    )
+
+    ds = ChunkDatasetInterpolatedImage(
+        str(root),
+        indices=indices,
+        length=example_len,
+        ch_names=ch_names,
+        pos_2d=pos,
+        sfreq=sfreq,
+        image_size=8,
+        normalize=False,
+    )
+
+    img_in, img_tgt = ds[0]
+
+    # Expect time-major dense images with a singleton channel dimension
+    assert img_in.shape == (1, example_len, 8, 8)
+    assert torch.allclose(img_in, img_tgt)
+
+    # Peak should sit on the pixel closest to the active sensor
+    row_idx, col_idx = compute_layout_indices(pos, image_size=8)
+    peak_pixel = img_in[0, 0, row_idx[0], col_idx[0]]
+    assert torch.isclose(peak_pixel, img_in.max())
+    # And interpolation should distribute energy beyond the central pixel
+    assert img_in.mean() < peak_pixel
 
 
 def test_split_datasets_merges_multiple_roots(tmp_path):
@@ -281,7 +321,7 @@ def test_chunk_dataset_image_handles_multi_dataset_layout(tmp_path):
         val_ratio=0.0,
         test_ratio=0.0,
         seed=0,
-        dataset_class="ChunkDatasetImage",
+        dataset_class="ChunkDatasetImageReconstruction",
         dataset_kwargs={"image_size": 16},
     )
 

@@ -1,24 +1,52 @@
 import os
 import re
+from functools import lru_cache
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+import json
 from torch.utils.data import Dataset
 
 from .augmentations import Augmentations
 from ..utils.quantizers import mulaw_torch
+from ..utils.image_interpolation import GaussianSensorInterpolator
+
 
 SENSOR_TYPES = {
-    "GRAD_CTF": 0,
+    "CTF_AXIAL_GRAD": 0,
     "MAG": 1,
-    "GRAD_ELEKTA_X": 2,
-    "GRAD_ELEKTA_Y": 3,
+    "ELEKTA_GRAD_PLANAR_X": 2,
+    "ELEKTA_GRAD_PLANAR_Y": 3,
 }
 
 DATASET_NAMES = {
-    "omega": "GRAD_CTF",
+    "omega": "CTF_AXIAL_GRAD",
+    "mous": "CTF_AXIAL_GRAD",
+    "camcan": ["MAG", "ELEKTA_GRAD_PLANAR_X", "ELEKTA_GRAD_PLANAR_Y"],
 }
+
+
+# Module-level LRU cache for chunk loading to avoid repeated disk I/O
+# Caches the raw dict from np.load; default 64 chunks (~4-8 GB typical)
+@lru_cache(maxsize=64)
+def _load_chunk_cached(file_path: str) -> dict:
+    """Load and cache a chunk file from disk.
+
+    Using module-level function with lru_cache enables sharing across dataset instances
+    and dataloader workers (within same process).
+    """
+    return np.load(file_path, allow_pickle=True).item()
+
+
+def clear_chunk_cache() -> None:
+    """Clear the chunk loading cache (useful for memory management)."""
+    _load_chunk_cached.cache_clear()
+
+
+def get_chunk_cache_info():
+    """Get cache statistics (hits, misses, size, maxsize)."""
+    return _load_chunk_cached.cache_info()
 
 
 class Postprocessor:
@@ -47,11 +75,10 @@ class Postprocessor:
         np.save(tmp_file, {"row_idx": row_idx, "col_idx": col_idx})
 
     def reshape(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Reshape an image into a channel-wise tensor. This is the opposite of
-        the vectorised scatter operation in __getitem__. It should create a tensor
-        with shape (C, T), where C is the number of channels, always lower
-        than H * W.
+        """Reshape an image into a channel-wise tensor. This is the opposite of the
+        vectorised scatter operation in __getitem__. It should create a tensor.
+
+        with shape (C, T), where C is the number of channels, always lower than H * W.
 
         x: [H, W, T] -> [C, T]
         """
@@ -101,9 +128,13 @@ class ChunkDataset(Dataset):
         aug_cfg: Optional[dict] = None,
         tmp_dir: str = "tmp",
         fill_value: int = 0,
+        layout_path: Optional[str] = None,
         *,
         ch_types: Optional[Sequence[Union[int, str]]] = None,
         session_channels: Optional[Mapping[Tuple[str, str], object]] = None,
+        has_condition: bool = False,
+        pos_3d: Optional[Sequence[Tuple[float, float, float]]] = None,
+        ori_3d: Optional[Sequence[Tuple[float, float, float]]] = None,
     ) -> None:
         self.root_dirs = self._normalise_roots(root_dir)
         self.default_dataset_key = next(iter(self.root_dirs))
@@ -114,13 +145,26 @@ class ChunkDataset(Dataset):
         self.image_size = image_size
         self.tmp_dir = tmp_dir
         self.fill_value = fill_value
+        self.has_condition = has_condition
 
         self.ch_names = [str(name) for name in ch_names]
-        self.pos_2d = np.asarray(pos_2d, dtype=np.float32)
+        self.pos_3d = None if pos_3d is None else np.asarray(pos_3d, dtype=np.float32)
+        self.ori_3d = None if ori_3d is None else np.asarray(ori_3d, dtype=np.float32)
         self.num_channels = len(self.ch_names)
-
         self.augmentations = Augmentations(aug_cfg)
+
+        if layout_path:
+            self.pos_2d = np.load(layout_path)
+        else:
+            self.pos_2d = np.asarray(pos_2d, dtype=np.float32)
         Postprocessor(self.pos_2d, image_size, tmp_dir)
+
+        if self.pos_3d is not None:
+            if self.pos_3d.shape[0] != self.num_channels or self.pos_3d.shape[1] != 3:
+                raise ValueError("pos_3d must have shape (num_channels, 3).")
+        if self.ori_3d is not None:
+            if self.ori_3d.shape[0] != self.num_channels or self.ori_3d.shape[1] != 3:
+                raise ValueError("ori_3d must have shape (num_channels, 3).")
 
         self.ch_type_labels = self._resolve_channel_labels(ch_types, name)
         self.ch_type = self._encode_channel_types(self.ch_type_labels)
@@ -248,57 +292,22 @@ class ChunkDataset(Dataset):
         dataset_key, session, chunk, start = self._resolve_index(idx)
         root = self.root_dirs[dataset_key]
         file_path = os.path.join(root, session, chunk)
-        data_dict = np.load(file_path, allow_pickle=True).item()
+        # Use cached loader to avoid repeated disk I/O for same chunk
+        data_dict = _load_chunk_cached(file_path)
 
         data = data_dict["data"]
-        window = data[:, start : start + self.length]
-        if window.shape[1] < self.length:
-            pad_width = self.length - window.shape[1]
-            window = np.pad(window, ((0, 0), (0, pad_width)), mode="constant")
-
-        mapped = np.ones((len(self.ch_names), self.length), dtype=window.dtype)
-        mapped *= self.fill_value
-        indices = self._get_session_indices(dataset_key, session, window.shape[0])
-
-        if len(indices) != window.shape[0]:
-            raise ValueError(
-                f"Channel count mismatch for session {session} ({dataset_key}):"
-                f" expected {len(indices)}, got {window.shape[0]}"
-            )
-
-        mapped[indices, :] = window
-        x = torch.from_numpy(mapped)
-
-        data_dict["indices"] = torch.from_numpy(indices)
-        return x, data_dict
-
-    def __getitem__(self, idx: int):  # type: ignore[override]
-        x, _ = self._load_data(idx)
-        x = x.long()
-
-        inputs = x[:, :-1]
-        targets = x[:, 1:]
-
-        return inputs, targets
-
-
-class ChunkDatasetCondition(ChunkDataset):
-    def _load_data(self, idx: int):
-        dataset_key, session, chunk, start = self._resolve_index(idx)
-        root = self.root_dirs[dataset_key]
-        file_path = os.path.join(root, session, chunk)
-        data_dict = np.load(file_path, allow_pickle=True).item()
-
-        data = data_dict["data"]
-        condition = data[-1, start : start + self.length]
 
         # check if condition contains a few integers, or continuous values
-        if "rest" in session:
-            window = data[:, start : start + self.length]
-            condition = np.zeros(self.length, dtype=window.dtype)
+        condition = None
+        window = data[:, start : start + self.length]
+        if self.has_condition:
+            if "rest" in session:
+                condition = np.zeros(self.length, dtype=window.dtype)
+            else:
+                window = data[:-1, start : start + self.length]
+                condition = data[-1, start : start + self.length]
 
-        else:
-            window = data[:-1, start : start + self.length]
+            data_dict["condition"] = torch.from_numpy(condition).long()
 
         if window.shape[1] < self.length:
             pad_width = self.length - window.shape[1]
@@ -318,34 +327,76 @@ class ChunkDatasetCondition(ChunkDataset):
         x = torch.from_numpy(mapped)
 
         data_dict["indices"] = torch.from_numpy(indices)
-        data_dict["condition"] = torch.from_numpy(condition).long()
-
         return x, data_dict
 
-    def __getitem__(self, idx: int):  # type: ignore[override]
+    def __getitem__(self, idx: int, return_dict: bool = False, long: bool = True):
         x, data_dict = self._load_data(idx)
-        x = x.long()
+        x = x.long() if long else x.float()
 
         inputs = x[:, :-1]
         targets = x[:, 1:]
-        cond = data_dict["condition"][None, :-1]
 
-        return (inputs, cond), targets
+        input_ret = inputs
+        if self.has_condition:
+            cond = data_dict["condition"][None, :-1]
+            input_ret = (inputs, cond)
+
+        if return_dict:
+            return input_ret, targets, data_dict
+
+        return input_ret, targets
+
+
+class ChunkDataset3D(ChunkDataset):
+    def __getitem__(self, idx: int, return_dict: bool = False, long: bool = True):
+        x, _ = self._load_data(idx)
+        x = x.long() if long else x.float()
+
+        # reshape x to [T, H, 1]
+        x = x.permute(1, 0)
+        x = x.unsqueeze(-1)
+
+        return x, x
+
+
+class BPEDataset(ChunkDataset3D):
+    def __init__(self, *args, group_size: int = 50, escape_value: int = 63, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.group_size = group_size
+        self.escape_value = escape_value
+        lookup = json.load(open(f"{self.root_dir}/char_lookup_codepoints.json"))
+
+        self.lookup = [chr(x) for x in lookup]
+
+    def __getitem__(self, idx: int):
+        x, _ = super().__getitem__(idx)
+        x = x.squeeze(-1)
+        T, C = x.shape
+
+        x[x == self.escape_value] = 0
+
+        groups: list[str] = []
+
+        for start in range(0, T, self.group_size):
+            end = min(start + self.group_size, T)
+            tokens = [
+                "".join(self.lookup[val] for val in x[start:end, ch]) for ch in range(C)
+            ]
+
+            groups.append(tokens)
+
+        return groups, x
 
 
 class ChunkDatasetMasked(ChunkDataset):
     def __getitem__(self, idx: int):  # type: ignore[override]
-        x, data_dict = self._load_data(idx)
-        x = x.long()
-
-        inputs = x[:, :-1]
-        targets = x[:, 1:]
+        input_ret, targets, data_dict = super().__getitem__(idx, return_dict=True)
 
         indices = data_dict["indices"]
         mask = torch.zeros(self.num_channels, dtype=torch.bool, device=indices.device)
         mask[indices] = True
 
-        return inputs, (targets, mask)
+        return input_ret, (targets, mask)
 
 
 class ChunkDatasetSubset(ChunkDataset):
@@ -366,6 +417,12 @@ class ChunkDatasetSubset(ChunkDataset):
 
         self._canonical_ch_names = list(self.ch_names)
         self._canonical_pos_2d = np.array(self.pos_2d, copy=True)
+        self._canonical_pos_3d = (
+            None if self.pos_3d is None else np.array(self.pos_3d, copy=True)
+        )
+        self._canonical_ori_3d = (
+            None if self.ori_3d is None else np.array(self.ori_3d, copy=True)
+        )
         self._canonical_ch_type = np.array(self.ch_type, copy=True)
         self._canonical_ch_type_labels = list(self.ch_type_labels)
 
@@ -379,6 +436,10 @@ class ChunkDatasetSubset(ChunkDataset):
 
         self.ch_names = list(self._subset_names)
         self.pos_2d = self._canonical_pos_2d[subset_indices]
+        if self._canonical_pos_3d is not None:
+            self.pos_3d = self._canonical_pos_3d[subset_indices]
+        if self._canonical_ori_3d is not None:
+            self.ori_3d = self._canonical_ori_3d[subset_indices]
         self.ch_type_labels = [
             self._canonical_ch_type_labels[i] for i in subset_indices
         ]
@@ -474,7 +535,8 @@ class ChunkDatasetSubset(ChunkDataset):
         dataset_key, session, chunk, start = self._resolve_index(idx)
         root = self.root_dirs[dataset_key]
         file_path = os.path.join(root, session, chunk)
-        data_dict = np.load(file_path, allow_pickle=True).item()
+        # Use cached loader to avoid repeated disk I/O for same chunk
+        data_dict = _load_chunk_cached(file_path)
 
         data = data_dict["data"]
         window = data[:, start : start + self.length]
@@ -508,12 +570,6 @@ class ChunkDatasetSubset(ChunkDataset):
         return x, data_dict
 
 
-class ChunkDatasetMous(ChunkDataset):
-    def __getitem__(self, idx: int):  # type: ignore[override]
-        inputs, targets = super().__getitem__(idx)
-        return inputs[:272, :], targets[:272, :]
-
-
 class ChunkDatasetJIT(ChunkDataset):
     def __init__(self, *args, quant_levels: int = 256, max_val: float = 5.0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -535,24 +591,52 @@ class ChunkDatasetJIT(ChunkDataset):
 
 class ChunkDatasetForecastCont(ChunkDataset):
     def __getitem__(self, idx: int):  # type: ignore[override]
-        x, _ = self._load_data(idx)
-
-        inputs = x[:, :-1].float()
-        targets = x[:, 1:].float()
-
-        return inputs, targets
+        return super().__getitem__(idx, long=False)
 
 
 class ChunkDatasetReconstruction(ChunkDataset):
+    def __init__(self, *args, transpose: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transpose = transpose
+
     def __getitem__(self, idx: int):  # type: ignore[override]
         x, _ = self._load_data(idx)
         x = x.float()
+        if self.transpose:
+            x = x.permute(1, 0)
 
         pos = torch.from_numpy(self.pos_2d).float()
         ch_type = torch.from_numpy(self.ch_type).long()
 
         inputs = (x, pos, ch_type)
 
+        return inputs, x
+
+
+class ChunkDatasetSensor3D(ChunkDatasetReconstruction):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.pos_3d is None or self.ori_3d is None:
+            raise ValueError(
+                "pos_3d and ori_3d must be provided for sensor geometry datasets."
+            )
+        pos_orientation = np.concatenate([self.pos_3d, self.ori_3d], axis=1)
+        self._pos_orientation = torch.from_numpy(pos_orientation.astype(np.float32))
+        unique_types = {
+            label: idx for idx, label in enumerate(sorted(set(self.ch_type_labels)))
+        }
+        mapped_types = np.array(
+            [unique_types[label] for label in self.ch_type_labels], dtype=np.int64
+        )
+        self._sensor_type = torch.from_numpy(mapped_types)
+
+    def __getitem__(self, idx: int):  # type: ignore[override]
+        x, _ = self._load_data(idx)
+        x = x.float()
+        if self.transpose:
+            x = x.permute(1, 0)
+
+        inputs = (x, self._pos_orientation, self._sensor_type)
         return inputs, x
 
 
@@ -565,64 +649,27 @@ class ChunkDatasetSensorPos(ChunkDataset):
         return data_dict["ch_names"], data_dict["pos_2d"]
 
 
-class ChunkDatasetImage(ChunkDataset):
-    """
-    Dataset that maps sensor channels into a sparse H×W image (default 32×32).
-    Each channel’s value is written to the pixel closest to its 2-D position
-    in ``pos_2d``.  The spatial layout of the MEG helmet is thus roughly
-    preserved inside an image that can be processed by vision models.
+class ChunkDatasetImageReconstruction(ChunkDataset):
+    """Dataset that maps sensor channels into a sparse HxW image (default 32x32). Each
+    channel's value is written to the pixel closest to its 2-D position in ``pos_2d``.
+    The spatial layout of the MEG helmet is thus roughly preserved inside an image that
+    can be processed by vision models.
 
-    Input  : x ∈ ℝ^{C×T}
-    Output : img ∈ ℝ^{H×W×T}  (sparse – most pixels are zero)
+    Input  : x ∈ R^{CxT} Output : img ∈ R^{HxWxT}  (sparse - most pixels are zero)
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self, *args, return_mask: bool = False, transpose: bool = False, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.postprocessor = self.make_postprocessor()
         self.row_idx = self.postprocessor.row_idx
         self.col_idx = self.postprocessor.col_idx
-
-    def __getitem__(self, idx: int):
-        x, _ = self._load_data(idx)  # x: [C, T]
-        x = x.float()
-
-        H = W = self.image_size
-        _, T = x.shape
-        img = torch.ones((H, W, T), dtype=x.dtype) * self.fill_value
-
-        # Vectorised scatter – assign each channel to its pixel across time
-        img[self.row_idx, self.col_idx, :] = x
-
-        return img, img
-
-
-class ChunkDatasetImageQuantized(ChunkDatasetImage):
-    def __getitem__(self, idx: int):
-        img, _ = super().__getitem__(idx)
-
-        return img[..., :-1].long(), img[..., 1:].long()
-
-
-class ChunkDatasetImageCondition(ChunkDatasetCondition):
-    """
-    Dataset that maps sensor channels into a sparse H×W image (default 32×32).
-    Each channel’s value is written to the pixel closest to its 2-D position
-    in ``pos_2d``.  The spatial layout of the MEG helmet is thus roughly
-    preserved inside an image that can be processed by vision models.
-
-    Input  : x ∈ ℝ^{C×T}
-    Output : img ∈ ℝ^{H×W×T}  (sparse – most pixels are zero)
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.postprocessor = self.make_postprocessor()
-        self.row_idx = self.postprocessor.row_idx
-        self.col_idx = self.postprocessor.col_idx
+        self.return_mask = return_mask
+        self.transpose = transpose
 
     def __getitem__(self, idx: int):
         x, data_dict = self._load_data(idx)  # x: [C, T]
-        cond = data_dict["condition"][None, None, :-1]
         x = x.float()
 
         H = W = self.image_size
@@ -632,52 +679,143 @@ class ChunkDatasetImageCondition(ChunkDatasetCondition):
         # Vectorised scatter – assign each channel to its pixel across time
         img[self.row_idx, self.col_idx, :] = x
 
-        return (img, cond), img
+        if self.transpose:
+            img = img.permute(2, 0, 1)
+
+        input_ret = img
+        if self.has_condition:
+            cond = data_dict["condition"][None, None, :]
+            input_ret = (img, cond)
+
+        if self.return_mask:
+            input_dict = {
+                "inputs": input_ret,
+                "row_idx": self.row_idx,
+                "col_idx": self.col_idx,
+            }
+            return input_dict, img
+
+        return input_ret, img
 
 
-class ChunkDatasetImageQuantizedCondition(ChunkDatasetImageCondition):
+class ChunkDatasetImageQuantized(ChunkDatasetImageReconstruction):
     def __getitem__(self, idx: int):
-        img, _ = super().__getitem__(idx)
-        img, cond = img
+        input_ret, img = super().__getitem__(idx)
+        inputs = img[..., :-1].long()
+        target = img[..., 1:].long()
 
-        return (img[..., :-1].long(), cond), img[..., 1:].long()
+        if isinstance(input_ret, tuple):
+            cond = input_ret[1][..., :-1]
+            return (inputs, cond), target
+
+        return inputs, target
 
 
-class ChunkDatasetImage01(ChunkDataset):
+class ChunkDatasetImage01(ChunkDatasetImageReconstruction):
+    """Dataset that maps sensor channels into a sparse HxW image (default 32x32) and
+    quantizes the values to 0-256. Each channel's value is written to the pixel closest
+    to its 2-D position in ``pos_2d``.  The spatial layout of the MEG helmet is thus
+    roughly preserved inside an image that can be processed by vision models.
+
+    Input  : x ∈ R^{CxT} Output : img ∈ {0,1}^{HxWxT}  (sparse - most pixels are zero)
+
+    The dataset returns (*img*[:, :, :-1], *img*[:, :, 1:]) so that models can learn to
+    predict the next timestep given the past.
     """
-    Dataset that maps sensor channels into a sparse H×W image (default 32×32).
-    Each channel’s value is written to the pixel closest to its 2-D position
-    in ``pos_2d``.  The spatial layout of the MEG helmet is thus roughly
-    preserved inside an image that can be processed by vision models.
 
-    Input  : x ∈ ℝ^{C×T}
-    Output : img ∈ ℝ^{H×W×T}  (sparse – most pixels are zero)
-
-    The dataset returns (*img*[:, :, :-1], *img*[:, :, 1:]) so that models can
-    learn to predict the next timestep given the past.
-    """
-
-    def __init__(self, *args, quant_levels=256, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         postprocessor = self.make_postprocessor()
         self.row_idx = postprocessor.row_idx
         self.col_idx = postprocessor.col_idx
-        self.quant_levels = quant_levels
 
     def __getitem__(self, idx: int):
-        x, _ = self._load_data(idx)  # x: [C, T]
-        x = x.float().transpose(0, 1)  # T, C
-        T, _ = x.shape
+        input_ret, img = super().__getitem__(idx)
 
-        # squash 1-256 to 0-1
-        x = (x + 1) / (self.quant_levels + 1)
+        # rescale to 0-1
+        img = (img + 10) / 20  # assume 5std clipping
 
-        H = W = self.image_size
-        img = torch.ones((T, H, W), dtype=x.dtype) * self.fill_value
+        img = img.permute(2, 0, 1).unsqueeze(1)  # T, 1, H, W
 
-        # Vectorised scatter – assign each channel to its pixel across time
-        img[..., self.row_idx, self.col_idx] = x
+        if isinstance(input_ret, tuple):
+            cond = input_ret[1].permute(2, 0, 1).unsqueeze(1)
+            return (img, cond), img
 
-        img = img.unsqueeze(1)  # T, 1, H, W
+        return img, img
+
+
+class PostprocessorTHW(Postprocessor):
+    def reshape(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.squeeze()
+        if x.ndim == 3:
+            x = x.unsqueeze(0)
+        # gather per time slice
+        return x[..., self.row_idx, self.col_idx].transpose(-1, -2)
+
+
+class PostprocessorInterpolator:
+    def __init__(
+        self, interpolator: GaussianSensorInterpolator, postprocessor: Postprocessor
+    ):
+        self.interpolator = interpolator
+        self.postprocessor = postprocessor
+
+    def reshape(self, x: torch.Tensor) -> torch.Tensor:
+        return self.interpolator.inverse(x)
+
+    def __call__(self, *tensors, gaussian: bool = False):
+        if gaussian:
+            return tuple(map(self.reshape, tensors))
+        else:
+            return self.postprocessor(*tensors)
+
+
+class ChunkDatasetInterpolatedImage(ChunkDataset):
+    """Dataset that interpolates sensor values into dense image frames using a Gaussian
+    kernel over the sensor layout.
+
+    This smooths sparse helmet measurements into a continuous 2-D map suitable for
+    vision models.
+    """
+
+    def __init__(
+        self,
+        *args,
+        image_size: int = 32,
+        sigma_scale: float = 0.75,
+        r_max_factor: float = 4.0,
+        normalize: bool = False,
+        min_std: float = 1e-6,
+        **kwargs,
+    ):
+        super().__init__(*args, image_size=image_size, **kwargs)
+        self.interpolator = GaussianSensorInterpolator(
+            self.pos_2d,
+            image_size=image_size,
+            sigma_scale=sigma_scale,
+            r_max_factor=r_max_factor,
+        )
+        self.normalize = normalize
+        self.min_std = float(min_std)
+
+        postprocessor = PostprocessorTHW(self.pos_2d, image_size)
+        self.row_idx = postprocessor.row_idx
+        self.col_idx = postprocessor.col_idx
+
+        self.postprocessor = PostprocessorInterpolator(self.interpolator, postprocessor)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.normalize:
+            return x
+        mean = x.mean()
+        std = x.std().clamp_min(self.min_std)
+        return (x - mean) / std
+
+    def __getitem__(self, idx: int):
+        x, _ = self._load_data(idx)  # [C, T]
+        x = self._normalize(x.float())
+
+        img = self.interpolator(x)  # [T, H, W]
+        img = img.unsqueeze(0)  # [1, T, H, W]
 
         return img, img

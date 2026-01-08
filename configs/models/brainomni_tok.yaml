@@ -1,9 +1,0 @@
-in_channels: 272
-latent_channels: 16  # original used 16
-base_channels: 32
-encoder_depth: 3
-codebook_size: 1024  # original used 512
-num_quantizers: 4
-emb_dim: 128  # original used 256
-num_types: 4
-num_positions: 2

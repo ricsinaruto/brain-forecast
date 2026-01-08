@@ -1,0 +1,27 @@
+base_model_name: STGPT2MEG
+num_classes: 39
+num_channels: 306
+d_model: 32
+red_dim: 16
+
+model_args:
+  num_channels: 306
+  vocab_size: 512
+  d_model: 32
+  layers: 8
+  trf_block: STGPTBlockParallel
+
+  trf_args:
+    attn_type: standard
+    mlp_type: moe
+
+    attn_args:
+      d_model: 32
+      nheads: 16
+      dropout: 0.1
+      rope: true
+
+    mlp_args:
+      d_model: 32
+      num_experts: 16
+      experts_per_token: 4

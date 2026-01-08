@@ -1,0 +1,34 @@
+tokenizer_path: /vol/data/trainings/omega/2sub/1to50hz/emu3visionvq/lightning_logs/version_51/checkpoints/best-checkpoint.ckpt
+train_tokenizer: false
+
+spatial_emb_dim: 4
+
+trf_args:
+  vocab_size: 8192
+  num_layers: 12
+
+  attn_args:
+    d_model: 256
+    nheads: 8
+    dropout: 0.1
+    rope: true
+
+  mlp_args:
+    d_model: 256
+
+tok_args:
+  codebook_size: 8192  # 32768
+  embed_dim: 4  # 4
+  z_channels: 4  # 4
+  double_z: False
+  in_channels: 1
+  out_channels: 1
+  temporal_downsample_factor: 4  # 4
+  ch: 128  # 256
+  ch_mult: [1, 2, 2, 2]  # this is 8x reduction, [1, 2, 2, 4]
+  num_res_blocks: 2  # 2
+  attn_resolutions: [3]  # [3]
+  quantizer_revive_warmup_steps: 2
+  quantizer_revive_interval: 10
+  quantizer_revive_min_usage: 1
+  quantizer_track_usage: False

@@ -1,0 +1,47 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/nsr/model.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/mous/2sub/1to50hz_causal/nsr/
+resume_from: null
+
+model_name: NSR
+loss_name: SpectralLoss
+eval_class: EvalCont
+
+datasplitter:
+  dataset_class: ChunkDatasetForecastCont
+  dataset_root: "/vol/data/datasets/MOUS/preprocessed_1to50hz_causal_cont"
+  example_seconds: 2.57  # 513 samples
+  overlap_seconds: 1.25
+  val_ratio: 0.0
+  test_ratio: 0.33
+  dataset_kwargs:
+    has_condition: true
+
+dataloader:
+  batch_size: 2048  # 512
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: true
+  use_test_dataset: true
+  future_steps: 10
+  unroll_steps: 100
+  gen_seconds: 600
+  gen_sampling: top_p
+  channel_shape: [273]
+  num_channels: 273
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/mous/2sub/1to50hz_causal/nsr/lightning_logs/version_17/checkpoints/best-checkpoint.ckpt

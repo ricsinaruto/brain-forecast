@@ -3,28 +3,38 @@ from __future__ import annotations
 import pytorch_lightning as pl
 import yaml
 import torch
+from pathlib import Path
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor
-from torch.utils.data import IterableDataset
 from pytorch_lightning.callbacks import StochasticWeightAveraging
+from pytorch_lightning.callbacks import EarlyStopping, BatchSizeFinder
+from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import F1Score, ConfusionMatrix
+from typing import Optional, TYPE_CHECKING
 import os
 import torchview  # noqa: F401  # optional, used only for model graph plotting
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from ..dataset import split_datasets
-from .lightning import LitModel
-from .lightning import DatasetEpochCallback
-from pytorch_lightning.callbacks import ModelCheckpoint
+from ..dataset import split_datasets, split_datasets_libribrain
+from .lightning import LitModel, LitDataModule, DatasetEpochCallback
+
 from .utils import get_model_class, get_loss_class
+from .train_bpe import TextBPETokenizerTrainer
+from .checkpointing import EvaluationLauncher, ThreadedModelCheckpoint
+from .performance import PerformanceMonitor
+from ..dataset import TextDataLoader  # noqa: F401
+
+if TYPE_CHECKING:
+    from .ibq_module import IBQLightning  # noqa: F401
+    from .vidtok import VidtokLightning  # noqa: F401
 
 
 class ExperimentTokenizer:
     def __init__(self, cfg: dict) -> None:
-        """
-        Args:
-            cfg: Configuration dictionary
+        """Args:
+
+        cfg: Configuration dictionary
         """
         datasets = split_datasets(**cfg["datasplitter"])
 
@@ -45,11 +55,21 @@ class ExperimentTokenizer:
         tokenizer.save_pretrained(cfg["save_dir"])
 
 
-class ExperimentDL:
+class ExperimentTokenizerText:
     def __init__(self, cfg: dict) -> None:
+        """Args:
+
+        cfg: Configuration dictionary
         """
-        Args:
-            cfg: Configuration dictionary
+        tokenizer = TextBPETokenizerTrainer(**cfg["tokenizer"])
+        tokenizer.train()
+
+
+class ExperimentDL:
+    def __init__(self, cfg: dict, lit_model: Optional[LitModel] = None) -> None:
+        """Args:
+
+        cfg: Configuration dictionary lit_model: Optional[LitModel] = None
         """
         # print pytorch version
         print("--------------------------------")
@@ -57,11 +77,15 @@ class ExperimentDL:
         print(f"PyTorch version: {torch.__version__}")
         print("--------------------------------")
 
+        self.cfg = cfg
         self.trainer_args = cfg["trainer"]
         self.dataloader_args = cfg["dataloader"]
         self.resume_from = cfg["resume_from"]
         self.dataset_name = cfg.get("dataset_name", "omega")
         self.save_dir = cfg["save_dir"]
+        self.free_run_cfg = cfg.get("k_step_free_run")
+        # Remove to avoid passing unknown kwargs to Lightning Trainer
+        self.early_stopping_cfg = self.trainer_args.pop("early_stopping", None)
 
         self.trainer_args["default_root_dir"] = cfg["save_dir"]
 
@@ -69,41 +93,91 @@ class ExperimentDL:
         with open(cfg["model_config"]) as f:
             model_cfg = yaml.safe_load(f)
 
+        # TensorBoard logger
+        self.logger = TensorBoardLogger(
+            save_dir=self.save_dir, name=cfg.get("experiment_name", "logs")
+        )
+        log_every = self.trainer_args.get("log_every_n_steps", 1)
+
         if cfg.get("dataset_name", "omega") == "omega":
             self.datasets = split_datasets(**cfg["datasplitter"])
+        elif cfg["dataset_name"] == "libribrain":
+            self.datasets = split_datasets_libribrain(**cfg["datasplitter"])
         else:
             raise ValueError(f"Invalid dataset name: {cfg['dataset_name']}")
 
         # Get model and loss classes dynamically
-        model_class = get_model_class(cfg["model_name"])
-        loss_class = get_loss_class(cfg["loss_name"])
+        model_class = None
+        loss_class = None
+        if cfg.get("model_name"):
+            model_class = get_model_class(cfg["model_name"])
+        if cfg.get("loss_name"):
+            loss_class = get_loss_class(cfg["loss_name"])
 
         postprocessor = getattr(self.datasets.train, "postprocessor", None)
 
-        self.lit_model = LitModel(
-            model_class=model_class,
-            loss_class=loss_class,
-            model_cfg=model_cfg,
-            loss_cfg=cfg["loss"],
-            trainer_cfg=cfg["lightning"],
-            postprocessor=postprocessor,
-        )
+        lit_model_args = {
+            "model_class": model_class,
+            "loss_class": loss_class,
+            "model_cfg": model_cfg,
+            "loss_cfg": cfg.get("loss", {}),
+            "trainer_cfg": cfg["lightning"],
+            "postprocessor": postprocessor,
+            "free_run_cfg": self.free_run_cfg,
+        }
+        if lit_model is not None:
+            self.lit_model = lit_model(**lit_model_args)
+        else:
+            self.lit_model = LitModel(**lit_model_args)
 
-        best_ckpt = ModelCheckpoint(
+        self.eval_launcher = None
+        if cfg.get("eval_runner", False):
+            if cfg["eval_runner"].get("enabled", False):
+                self.eval_launcher = EvaluationLauncher(cfg, Path(self.save_dir))
+
+        ckpt_cadence = self.trainer_args.pop("checkpoint_cadence_epochs", None)
+
+        best_ckpt = ThreadedModelCheckpoint(
             monitor="val_loss",  # metric to monitor
             mode="min",  # 'min' for loss, 'max' for accuracy or similar
             save_top_k=1,  # save only the best model
             filename="best-checkpoint",  # optional: custom filename
         )
-        epoch_ckpt = ModelCheckpoint(
+        epoch_ckpt = ThreadedModelCheckpoint(
             filename="last-checkpoint",
-            save_top_k=-1,                 # keep every epoch
-            every_n_train_steps=self.trainer_args.get("log_every_n_steps", 100),
+            save_top_k=-1,  # keep every epoch
             save_on_train_epoch_end=True,  # trigger right after each epoch
+            epoch_cadence=ckpt_cadence,
+            after_save=self.eval_launcher,
         )
 
         callbacks = self.trainer_args.get("callbacks", []) or []
         callbacks.extend([best_ckpt, epoch_ckpt])
+
+        perf_callback = PerformanceMonitor(log_every_n_steps=log_every)
+        callbacks.append(perf_callback)
+
+        if self.trainer_args.pop("tune_batch_size", True):
+            batch_size_finder = BatchSizeFinder(
+                mode="power",  # or "binsearch"
+                init_val=self.dataloader_args["batch_size"],
+                steps_per_trial=3,
+                max_trials=25,
+                batch_arg_name="batch_size",
+            )
+            callbacks.append(batch_size_finder)
+
+        # Optional early stopping based on validation loss stagnation
+        early_stopping_cfg = (
+            self.early_stopping_cfg
+            if self.early_stopping_cfg is not None
+            else cfg.get("early_stopping")
+        )
+        if isinstance(early_stopping_cfg, bool):
+            if early_stopping_cfg:
+                callbacks.append(self._build_early_stopping({}))
+        elif early_stopping_cfg is not None:
+            callbacks.append(self._build_early_stopping(early_stopping_cfg))
 
         # If the training dataset exposes an epoch hook, add a callback
         if hasattr(self.datasets, "train") and (
@@ -114,6 +188,41 @@ class ExperimentDL:
             callbacks.append(StochasticWeightAveraging(swa_lrs=1e-2))
 
         self.trainer_args["callbacks"] = callbacks
+        self.trainer_args["logger"] = self.logger
+
+    def _build_early_stopping(self, cfg) -> EarlyStopping:
+        """Normalize user config and build an EarlyStopping callback."""
+        if cfg is True:
+            cfg = {}
+        if isinstance(cfg, int):
+            cfg = {"patience": int(cfg)}
+        if not isinstance(cfg, dict):
+            raise ValueError("early_stopping must be a bool, int, or dict.")
+
+        patience = int(cfg.get("patience", 10))
+        if patience < 0:
+            raise ValueError("early_stopping.patience must be >= 0")
+
+        kwargs = {
+            "monitor": cfg.get("monitor", "val_loss"),
+            "mode": cfg.get("mode", "min"),
+            "patience": patience,
+            "min_delta": float(cfg.get("min_delta", 0.0)),
+            "check_on_train_epoch_end": bool(
+                cfg.get("check_on_train_epoch_end", False)
+            ),
+        }
+        for key in (
+            "stopping_threshold",
+            "divergence_threshold",
+            "strict",
+            "verbose",
+            "check_finite",
+            "log_rank_zero_only",
+        ):
+            if key in cfg:
+                kwargs[key] = cfg[key]
+        return EarlyStopping(**kwargs)
 
     def _visualize_model(self, cfg: dict) -> None:
         # Use torchview to visualize the model
@@ -131,20 +240,19 @@ class ExperimentDL:
     def train(self) -> None:
         args = self.dataloader_args
 
-        shuffle = None if isinstance(self.datasets.train, IterableDataset) else True
-        train_loader = DataLoader(self.datasets.train, shuffle=shuffle, **args)
+        dataloader_cls_name = self.cfg.get("dataloader_class", "DataLoader")
+        dataloader_cls = globals()[dataloader_cls_name]
 
-        shuffle = None if isinstance(self.datasets.val, IterableDataset) else False
-        val_loader = DataLoader(self.datasets.val, shuffle=shuffle, **args)
+        dm = LitDataModule(self.datasets.train, self.datasets.val, dataloader_cls, args)
         trainer = pl.Trainer(**self.trainer_args)
-        trainer.fit(
-            self.lit_model, train_loader, val_loader, ckpt_path=self.resume_from
-        )
+
+        trainer.fit(self.lit_model, datamodule=dm, ckpt_path=self.resume_from)
 
     def test(self) -> None:
         args = self.dataloader_args
         test_loader = DataLoader(self.datasets.test, shuffle=False, **args)
         trainer = pl.Trainer(**self.trainer_args)
+
         trainer.test(self.lit_model, test_loader, ckpt_path=self.resume_from)
 
         if self.lit_model.test_targets:
@@ -189,3 +297,30 @@ class ExperimentDL:
             self.datasets.test.generate_submission_in_csv(
                 preds, f"{self.save_dir}/holdout_phoneme_predictions.csv"
             )
+
+
+class ExperimentIBQ(ExperimentDL):
+    """Training harness for the IBQ tokenizer on MEG interpolated images."""
+
+    def __init__(self, cfg: dict) -> None:
+        # Run base init to set up logging, callbacks, trainer args, and dataset splits.
+        from .ibq_module import IBQLightning
+
+        super().__init__(cfg, lit_model=IBQLightning)
+
+
+class ExperimentVidtok(ExperimentDL):
+    """Training harness for the VidTok model on MEG interpolated images."""
+
+    def __init__(self, cfg: dict) -> None:
+        # Run base init to set up logging, callbacks, trainer args, and dataset splits.
+        from .vidtok import VidtokLightning, ImageSaverCallback
+
+        super().__init__(cfg, lit_model=VidtokLightning)
+
+        # Add image saver callback for reconstruction visualization
+        image_saver = ImageSaverCallback(
+            save_dir=self.save_dir,
+            num_samples=cfg.get("image_saver_num_samples", 4),
+        )
+        self.trainer_args["callbacks"].append(image_saver)

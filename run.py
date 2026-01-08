@@ -6,15 +6,21 @@ import mne
 
 mne.set_log_level("WARNING")
 torch.set_float32_matmul_precision("medium")
+torch.backends.cudnn.benchmark = True
 
 from ephys_gpt import (  # noqa: E402
     ExperimentTokenizer,
     ExperimentDL,
+    ExperimentTokenizerText,
+    ExperimentIBQ,
+    ExperimentVidtok,
     EvalQuant,
     EvalDiffusion,
     EvalFlow,
-    EvalBENDR,
+    EvalCont,
     EvalVQ,
+    EvalFlat,
+    EvalText,
 )
 
 
@@ -22,25 +28,39 @@ eval_class_map = {
     "EvalQuant": EvalQuant,
     "EvalDiffusion": EvalDiffusion,
     "EvalFlow": EvalFlow,
-    "EvalBENDR": EvalBENDR,
+    "EvalCont": EvalCont,
     "EvalVQ": EvalVQ,
+    "EvalFlat": EvalFlat,
+    "EvalText": EvalText,
 }
 
 
 def main(cli_args=None):
     # parse arguments to script
     parser = argparse.ArgumentParser()
-    parser.add_argument("-a", "--args", type=str, default="", help="args file name")
+    parser.add_argument("-a", "--args", type=str, help="args file name", required=True)
     parser.add_argument(
-        "-m", "--mode", type=str, default="", help="run mode", required=True
+        "-m",
+        "--mode",
+        type=str,
+        help="run mode",
+        required=True,
+        choices=[
+            "train",
+            "test",
+            "eval",
+            "tokenizer",
+            "tokenizer-text",
+            "ibq",
+            "vidtok",
+        ],
     )
 
     script_args = parser.parse_args(cli_args)
     args_file = script_args.args
     mode = script_args.mode
 
-    config_path = args_file or "configs/train.yaml"
-    with open(config_path) as f:
+    with open(args_file) as f:
         cfg = yaml.safe_load(f)
 
     if mode == "train":
@@ -48,12 +68,17 @@ def main(cli_args=None):
     elif mode == "test":
         ExperimentDL(cfg).test()
     elif mode == "eval":
-        # choose correct class based on config, default to Evals
         eval_key = cfg.get("eval_class", "EvalQuant")
         eval_class = eval_class_map.get(eval_key, EvalQuant)
         eval_class(cfg).run_all()
     elif mode == "tokenizer":
         ExperimentTokenizer(cfg)
+    elif mode == "tokenizer-text":
+        ExperimentTokenizerText(cfg)
+    elif mode == "ibq":
+        ExperimentIBQ(cfg).train()
+    elif mode == "vidtok":
+        ExperimentVidtok(cfg).train()
     else:
         raise ValueError(f"Invalid mode: {mode}")
 

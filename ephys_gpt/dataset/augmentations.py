@@ -33,16 +33,14 @@ class Augmentations:
 
 
 class RandomTimeWarp:
-    """
-    Random, monotonic time warping applied along the last dimension (timesteps).
+    """Random, monotonic time warping applied along the last dimension (timesteps).
 
-    Works with inputs shaped (C, T) or (H, W, T). For (H, W, T) inputs, the
-    warping is shared across all H×W channels for temporal consistency.
+    Works with inputs shaped (C, T) or (H, W, T). For (H, W, T) inputs, the warping is
+    shared across all H×W channels for temporal consistency.
 
-    Args:
-        num_anchors: Number of control points (≥2). Higher → smoother warps.
-        strength: Variability of local speed around identity (0 → identity).
-        p: Probability of applying the augmentation.
+    Args:     num_anchors: Number of control points (≥2). Higher → smoother warps.
+    strength: Variability of local speed around identity (0 → identity).     p:
+    Probability of applying the augmentation.
     """
 
     def __init__(self, num_anchors: int = 6, strength: float = 0.2, p: float = 1.0):
@@ -114,16 +112,13 @@ class RandomTimeWarp:
 
 
 class RandomTimeMask:
-    """
-    Randomly masks a fixed number of time blocks across all channels.
+    """Randomly masks a fixed number of time blocks across all channels.
 
     Works with (C, T) or (H, W, T) inputs. Masking is applied along time.
 
-    Args:
-        num_blocks: Number of blocks to mask.
-        block_len: Length of each masked block in samples.
-        value: Fill value for masked regions (default 0.0).
-        p: Probability of applying the augmentation.
+    Args:     num_blocks: Number of blocks to mask.     block_len: Length of each masked
+    block in samples.     value: Fill value for masked regions (default 0.0).     p:
+    Probability of applying the augmentation.
     """
 
     def __init__(
@@ -165,18 +160,16 @@ class RandomTimeMask:
 
 
 class RandomTimeShift:
-    """
-    Randomly shifts the signal along the time axis by up to ``max_shift`` steps.
+    """Randomly shifts the signal along the time axis by up to ``max_shift`` steps.
 
-    Works with inputs shaped (C, T) or (H, W, T). For positive shifts the
-    content is delayed (shifted to the right); negative shifts advance it. By
-    default, vacated samples are filled with ``fill_value``.
+    Works with inputs shaped (C, T) or (H, W, T). For positive shifts the content is
+    delayed (shifted to the right); negative shifts advance it. By default, vacated
+    samples are filled with ``fill_value``.
 
-    Args:
-        max_shift: Maximum absolute integer shift (in samples).
-        fill_value: Value used to fill newly exposed samples when ``wrap=False``.
-        wrap: If True, performs a circular shift via ``torch.roll`` instead.
-        p: Probability of applying the augmentation.
+    Args:     max_shift: Maximum absolute integer shift (in samples).     fill_value:
+    Value used to fill newly exposed samples when ``wrap=False``.     wrap: If True,
+    performs a circular shift via ``torch.roll`` instead.     p: Probability of applying
+    the augmentation.
     """
 
     def __init__(
@@ -218,13 +211,11 @@ class RandomTimeShift:
 
 
 class AdditiveNoise:
-    """
-    Adds zero-mean Gaussian noise to the signal.
+    """Adds zero-mean Gaussian noise to the signal.
 
-    Args:
-        sigma: Noise scale. If relative=True, it's relative to per-channel std.
-        relative: Whether to scale sigma by per-channel standard deviation.
-        p: Probability of applying the augmentation.
+    Args:     sigma: Noise scale. If relative=True, it's relative to per-channel std.
+    relative: Whether to scale sigma by per-channel standard deviation.     p:
+    Probability of applying the augmentation.
     """
 
     def __init__(self, sigma: float = 0.01, relative: bool = True, p: float = 1.0):
@@ -257,16 +248,13 @@ class AdditiveNoise:
 
 
 class RandomSpatialWarp:
-    """
-    Random 2-D affine warp for inputs shaped (H, W, T). Applies the same spatial
+    """Random 2-D affine warp for inputs shaped (H, W, T). Applies the same spatial
     transform to all timesteps to preserve temporal coherence. No-op for (C, T).
 
-    Args:
-        max_degrees: Maximum absolute rotation in degrees.
-        max_translate: Maximum translation as fraction of image size.
-        scale_range: Tuple (min_scale, max_scale).
-        p: Probability of applying the augmentation.
-        mode: Interpolation mode: "bilinear" or "nearest" (auto for integer types).
+    Args:     max_degrees: Maximum absolute rotation in degrees.     max_translate:
+    Maximum translation as fraction of image size.     scale_range: Tuple (min_scale,
+    max_scale).     p: Probability of applying the augmentation.     mode: Interpolation
+    mode: "bilinear" or "nearest" (auto for integer types).
     """
 
     def __init__(
@@ -328,13 +316,11 @@ class RandomSpatialWarp:
 
 
 class RandomNeighborChannelSwap:
-    """
-    Randomly swaps neighbouring spatial channels for (H, W, T) inputs. No-op for
-    (C, T) inputs.
+    """Randomly swaps neighbouring spatial channels for (H, W, T) inputs. No-op for (C,
+    T) inputs.
 
-    Args:
-        num_swaps: Number of neighbour swaps to perform.
-        p: Probability of applying the augmentation.
+    Args:     num_swaps: Number of neighbour swaps to perform.     p: Probability of
+    applying the augmentation.
     """
 
     def __init__(self, num_swaps: int = 8, p: float = 1.0) -> None:

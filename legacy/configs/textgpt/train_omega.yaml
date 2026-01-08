@@ -1,0 +1,49 @@
+model_config: configs/textgpt/model_smollm.yaml
+
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/textgpt/smollm/5bit
+resume_from: null
+
+model_name: FlatGPT
+loss_name: CrossEntropyWithCodes
+
+datasplitter:
+  dataset_class: BPEDataset
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt
+  example_seconds: 30
+  overlap_seconds: 15
+  val_ratio: 0.1
+  test_ratio: 0.1
+  dataset_kwargs:
+    escape_value: 31
+    group_size: 5  # vary
+
+dataloader_class: TextDataLoader
+dataloader:
+  batch_size: 1
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  tokenizer_path: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt
+  max_length: 150000
+  use_separator: false
+
+loss: {}
+
+lightning:
+  lr: 1.0e-4
+  weight_decay: 0.1  # 0.1 in qwen
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-5
+    T_max: 50
+
+trainer:
+  max_epochs: 50
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0  # 1.0 in qwen
+  early_stopping:
+    monitor: val_loss
+    patience: 10

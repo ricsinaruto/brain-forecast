@@ -1,0 +1,32 @@
+model_config: configs/flatgpt/model_smollm.yaml
+
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/flatgpt/smollm
+resume_from: null
+
+model_name: FlatGPT
+loss_name: CrossEntropyWithCodes
+eval_class: EvalFlat
+
+datasplitter:
+  dataset_class: ChunkDataset3D
+  # dataset_root: /Users/richard/Datasets/Omega/preprocessed_1to50hz_ss_small
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_small
+  example_seconds: 10
+  overlap_seconds: 5
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 1
+  pin_memory: true
+
+eval:
+  accelerator: cuda
+  save_test_data: true
+  use_test_dataset: false
+
+  gen_seconds: 60
+  overlap: 680
+  channel_shape: [68]
+  num_channels: 68
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz_ss/flatgpt/smollm/lightning_logs/version_20/checkpoints/best-checkpoint.ckpt

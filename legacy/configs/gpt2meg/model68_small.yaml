@@ -1,0 +1,19 @@
+num_channels: 68
+
+embedding_args:
+  channel_emb: 64
+  quant_emb: 64
+
+gpt2_config:
+  vocab_size: 256
+  n_positions: 200
+  n_embd: 64
+  n_layer: 40
+  n_head: 8
+  resid_pdrop: 0.0
+  embd_pdrop: 0.0
+  attn_pdrop: 0.0
+  bos_token_id: 255
+  eos_token_id: 255
+  name_or_path: null
+  use_cache: false

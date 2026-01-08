@@ -4,8 +4,8 @@
 # Root directory containing raw dataset
 data_path: "/mnt/datasets/raw/MOUS"
 stage1_path: "/mnt/datasets/preprocessed1to50hz/MOUS"
-save_path: "/mnt/datasets/preprocessed1to50hz/MOUS"
-log_dir: "/vol/data/datasets/MOUS/preprocessed1to50hz"
+save_path: "/mnt/datasets/preprocessed1to50hz_bads/MOUS"
+log_dir: "/vol/data/datasets/MOUS/preprocessed1to50hz_bads"
 delete_fif: false
 maxwell: false
 skip_done: true
@@ -15,6 +15,7 @@ n_workers: 16
 
 # Length of each saved chunk in seconds
 chunk_seconds: 60
+interpolate_bads: true
 
 # Optional path to a custom OSL preprocessing config
 osl_config: configs/preproc/osl_mous.yaml

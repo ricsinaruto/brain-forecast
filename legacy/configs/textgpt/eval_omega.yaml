@@ -1,0 +1,46 @@
+model_config: configs/textgpt/model_smollm.yaml
+
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/textgpt/smollm/5bit
+resume_from: null
+
+model_name: FlatGPT
+loss_name: CrossEntropyWithCodes
+eval_class: EvalText
+
+datasplitter:
+  dataset_class: BPEDataset
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt
+  example_seconds: 30
+  overlap_seconds: 15
+  val_ratio: 0.1
+  test_ratio: 0.1
+  dataset_kwargs:
+    escape_value: 31
+    group_size: 5  # vary
+
+dataloader_class: TextDataLoader
+dataloader:
+  batch_size: 1
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  tokenizer_path: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt
+  max_length: 150000
+  use_separator: false
+
+eval:
+  accelerator: cuda
+  save_test_data: true
+  use_test_dataset: false
+  future_steps: 1
+  unroll_steps: 1
+  gen_seconds: 10
+  overlap: 50
+  quant_levels: 32
+  gen_sampling: top_p
+  channel_shape: [68]
+  num_channels: 68
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz_ss/textgpt/smollm/5bit/lightning_logs/version_6/checkpoints/best-checkpoint.ckpt

@@ -1,9 +1,10 @@
 """Base classes for ephys recordings."""
 
 import warnings
-from typing import Any
-from scipy import signal
 from pathlib import Path
+from typing import Any
+
+from scipy import signal
 
 import mne
 
@@ -12,10 +13,92 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 from mne.io.constants import FIFF
 from mne.datasets import fetch_fsaverage
 from mne.minimum_norm import make_inverse_operator, apply_inverse_raw
+from osl_ephys import preprocessing
 
-from ..utils.quantizers import mulaw
+from ..utils.quantizers import mulaw, mulaw_inv
+from ..utils.utils import compute_roi_layout_2d
 
 from .base import Preprocessing
+
+
+def predictive_residual_encode(x: np.ndarray) -> np.ndarray:
+    """Second-order predictor residuals with seeds stored in the first two steps.
+
+    ẑ[t] = 2*z[t-1] - z[t-2] e[t] = z[t] - ẑ[t]
+    """
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D array (C, T); got shape {arr.shape}")
+
+    C, T = arr.shape
+    residual = np.empty_like(arr, dtype=np.float32)
+    if T == 0:
+        return residual
+
+    residual[:, 0] = arr[:, 0]
+    if T == 1:
+        return residual
+
+    residual[:, 1] = arr[:, 1]
+    if T > 2:
+        residual[:, 2:] = arr[:, 2:] - 0.95 * arr[:, 1:-1]  # + arr[:, :-2]
+    return residual
+
+
+def quantize_deadzone_linear(
+    e: np.ndarray, deadzone: float, Emax: float = 1.0, bins: int = 256
+) -> np.ndarray:
+    q = np.zeros_like(e, dtype=np.uint8)
+    center = bins // 2  # pick center code
+
+    # deadzone -> exactly center
+    mask = np.abs(e) <= deadzone
+    q[mask] = center
+
+    # outside deadzone: quantize linearly to remaining codes
+    # map (-Emax..-deadzone) -> (0..127), (deadzone..Emax) -> (129..255)
+    pos = e > deadzone
+    neg = e < -deadzone
+
+    # positive side
+    u = (e[pos] - deadzone) / (Emax - deadzone)  # 0..1
+    q[pos] = (center + 1 + np.round(u * (bins - 1 - center - 1))).astype(np.uint8)
+
+    # negative side
+    u = (-e[neg] - deadzone) / (Emax - deadzone)  # 0..1
+    q[neg] = (center - 1 - np.round(u * (center - 1))).astype(np.uint8)
+
+    return q
+
+
+def predictive_residual_decode(residual: np.ndarray) -> np.ndarray:
+    """Invert the predictor residuals via causal integration."""
+    res = np.asarray(residual, dtype=np.float32)
+    if res.ndim != 2:
+        raise ValueError(f"Expected 2D array (C, T); got shape {res.shape}")
+
+    C, T = res.shape
+    out = np.empty_like(res, dtype=np.float32)
+    if T == 0:
+        return out
+
+    out[:, 0] = res[:, 0]
+    if T == 1:
+        return out
+
+    out[:, 1] = res[:, 1]
+    for t in range(2, T):
+        out[:, t] = res[:, t] + 2 * out[:, t - 1] - out[:, t - 2]
+    return out
+
+
+def predictive_mulaw_decode(
+    tokens: np.ndarray, *, scale: float | np.ndarray = 1.0, mu: int = 255
+) -> np.ndarray:
+    """Inverse µ-law then integrate residuals back to continuous values."""
+    residual = mulaw_inv(tokens, mu)
+    residual = residual * np.asarray(scale, dtype=np.float32)
+    return predictive_residual_decode(residual)
 
 
 class Ephys(Preprocessing):
@@ -67,18 +150,28 @@ class Ephys(Preprocessing):
         maxwell: bool = False,
         source_space: bool = False,
         sfreq: int = None,
+        interpolate_bads: bool = False,
         get_fsaverage_data: bool = False,
+        residual_scale: float = 1.0,
         fsaverage_dir: str = "/vol/data/datasets/mne_data",
+        bad_handling: str = "zero",
         **kwargs,
     ) -> None:
-        """
-        Args:
-            maxwell: Whether to use the maxwell filter
+        """Args:
+
+        maxwell: Whether to use the maxwell filter
         """
         super().__init__(*args, **kwargs)
 
+        self.residual_scale = residual_scale
         self.source_space = source_space
         self.sfreq = sfreq
+        self.interpolate_bads = interpolate_bads
+        # keep backwards compat: interpolate_bads flag overrides default handling
+        if interpolate_bads and bad_handling == "zero":
+            self.bad_handling = "interpolate"
+        else:
+            self.bad_handling = bad_handling
         if self.osl_config is None:
             if maxwell:
                 self.osl_config = self.default_config_maxwell
@@ -95,9 +188,8 @@ class Ephys(Preprocessing):
     ) -> dict[str, Any]:
         """Find events if stim channels are present, otherwise continue without events.
 
-        Args:
-            data: Dictionary containing raw MNE object
-            min_duration: Minimum duration between events in seconds
+        Args:     data: Dictionary containing raw MNE object     min_duration: Minimum
+        duration between events in seconds
         """
         raw = data["raw"]
 
@@ -215,20 +307,20 @@ class Ephys(Preprocessing):
         ]
         ts = mne.extract_label_time_course(stc, labels, src, mode="mean_flip")
 
+        pos2d = compute_roi_layout_2d(labels, src)
+
         # Post-processing
         # 1) detrend
         ts = signal.detrend(ts, axis=1, type="linear")
 
         # 2) resample
-        gcd = int(np.gcd(int(round(sfreq)), int(round(self.sfreq))))
-        up = int(round(self.sfreq / gcd))
-        down = int(round(sfreq / gcd))
-        ts = signal.resample_poly(ts, up, down, axis=1, padtype="line")
-
-        # fake pos_2d
-        pos_2d = np.array(
-            [[i / ts.shape[0], i / ts.shape[0]] for i in range(ts.shape[0])]
-        )
+        if self.sfreq is not None:
+            gcd = int(np.gcd(int(round(sfreq)), int(round(self.sfreq))))
+            up = int(round(self.sfreq / gcd))
+            down = int(round(sfreq / gcd))
+            ts = signal.resample_poly(ts, up, down, axis=1, padtype="line")
+        else:
+            self.sfreq = sfreq
 
         # assemble dict
         data = {
@@ -236,34 +328,96 @@ class Ephys(Preprocessing):
             "sfreq": self.sfreq,
             "ch_names": [f"src{i}" for i in range(ts.shape[0])],
             "ch_types": ["parcel"] * ts.shape[0],
-            "pos_2d": pos_2d,
+            "pos_2d": pos2d,
             "session": subject,
             "decimate": int(sfreq / self.sfreq),
         }
         return data
 
+    def _interpolate_bads(self, raw):
+        """Interpolate bad channels using MNE's interpolate_bads function."""
+        for picks in ("mag", "grad"):
+            try:
+                raw = preprocessing.osl_wrappers.bad_channels(
+                    raw, picks=picks, ref_meg=False
+                )
+            except Exception:
+                continue
+
+        # print how many bad channels were interpolated
+        print(f"INFO: Detected {len(raw.info['bads'])} bad channels")
+
+        # if number of bad channels is more than 25, return -> bad session
+        if len(raw.info["bads"]) > 25:
+            print(
+                f"INFO: Too many bad channels ({len(raw.info['bads'])}), skipping sess"
+            )
+            return None
+
+        # don't interpolate bads if we are doing source space projection
+        if self.source_space:
+            return raw
+
+        print(f"INFO: Interpolating {len(raw.info['bads'])} bad channels")
+        return raw.copy().interpolate_bads(reset_bads=True)
+
+    def _detect_bad_channels(self, raw):
+        """Run bad channel detection while excluding reference channels."""
+        bads: set[str] = set(raw.info.get("bads", []))
+        for picks in ("mag", "grad"):
+            try:
+                tmp = preprocessing.osl_wrappers.bad_channels(
+                    raw.copy(), picks=picks, ref_meg=False
+                )
+                bads.update(tmp.info.get("bads", []))
+            except Exception as exc:  # pragma: no cover - detection failures are logged
+                print(f"WARNING: bad channel detection failed for picks={picks}: {exc}")
+                continue
+        raw.info["bads"] = list(bads)
+        return raw
+
+    def _safe_interpolate_bads(self, raw):
+        """Interpolate bad channels; if interpolation fails, return None."""
+        try:
+            return self._interpolate_bads(raw)
+        except Exception as exc:  # pragma: no cover - mne interpolation errors
+            print(f"WARNING: interpolate_bads failed: {exc}")
+            return None
+
     def extract_raw(self, fif_file: str, subject: str) -> dict[str, Any]:
         """Extract raw data and metadata from MNE Raw object with memory efficiency.
 
         Args:
-            fif_file: Path to the fif file
-            subject: Subject name
+        fif_file: Path to the fif file
+        subject: Subject name
 
         Returns:
-            Dictionary containing raw data and metadata
+        Dictionary containing raw data and metadata
         """
         data = {}
         raw = mne.io.read_raw_fif(fif_file, preload=True)
 
-        if self.source_space:
-            return self.source_space_proj(raw, subject)
-
-        # keep only the MEG channels
+        # keep only the MEG channels (drop reference channels early)
         keep_chn = [
             raw.ch_names[idx]
             for idx in mne.pick_types(raw.info, meg=True, ref_meg=False)
         ]
         raw.pick(picks=keep_chn)
+
+        detected_bads: list[str] = []
+        if self.bad_handling in {"zero", "interpolate"}:
+            raw = self._detect_bad_channels(raw)
+            detected_bads = [
+                name for name in raw.info.get("bads", []) if name in raw.ch_names
+            ]
+            if self.bad_handling == "interpolate":
+                raw_interp = self._safe_interpolate_bads(raw)
+                if raw_interp is None:
+                    return None
+                raw = raw_interp
+
+        if self.source_space:
+            return self.source_space_proj(raw, subject)
 
         # Use memory-efficient data loading
         with warnings.catch_warnings():
@@ -276,16 +430,30 @@ class Ephys(Preprocessing):
         data["ch_types"] = [
             raw.info["chs"][idx]["kind"] for idx in range(len(raw.ch_names))
         ]
+        data["bad_channels"] = detected_bads
 
         # Get 2D sensor positions
         layout = mne.channels.find_layout(raw.info)
 
         # Filter layout to only keep position of channels in ch_names
         positions = []
+        positions_3d = []
+        orientations = []
         for ch_name in data["ch_names"]:
             pos = layout.pos[layout.names.index(ch_name.split("-")[0])]
             positions.append(pos[:2])
+            ch_info = raw.info["chs"][raw.ch_names.index(ch_name)]
+            loc = ch_info.get("loc", np.zeros(12, dtype=float))
+            positions_3d.append(loc[:3])
+
+            # MNE stores a 3x3 rotation matrix in loc[3:], columns (ex, ey, ez).
+            # The coil "normal" aligns with the ez column for MEG sensors.
+            ori_vec = np.array(loc[9:12], dtype=float)
+            norm = np.linalg.norm(ori_vec)
+            orientations.append(ori_vec / norm if norm > 0 else ori_vec)
         data["pos_2d"] = np.array(positions)
+        data["pos_3d"] = np.array(positions_3d)
+        data["ori_3d"] = np.array(orientations)
 
         # Get bad channels
         # data["bad_chs"] = raw.info["bads"]
@@ -297,12 +465,10 @@ class Ephys(Preprocessing):
     def normalize(self, data, method: str = "robust") -> dict[str, Any]:
         """Memory-efficient normalization using batches.
 
-        Args:
-            data: Dictionary containing raw data and metadata
-            method: Method to use for normalization
+        Args:     data: Dictionary containing raw data and metadata     method: Method
+        to use for normalization
 
-        Returns:
-            Dictionary containing normalized data
+        Returns:     Dictionary containing normalized data
         """
         cont_data = data["raw_array"]
 
@@ -325,12 +491,10 @@ class Ephys(Preprocessing):
     def clip(self, data: dict[str, Any], std_factor: float = 3) -> dict[str, Any]:
         """Outlier clipping over the whole data array at once.
 
-        Args:
-            data: Dictionary containing raw data and metadata
-            std_factor: Factor to multiply the standard deviation by
+        Args:     data: Dictionary containing raw data and metadata     std_factor:
+        Factor to multiply the standard deviation by
 
-        Returns:
-            Dictionary containing clipped data
+        Returns:     Dictionary containing clipped data
         """
         arr = data["raw_array"]
         mean = arr.mean(axis=1, keepdims=True)
@@ -347,13 +511,10 @@ class Ephys(Preprocessing):
         return data
 
     def mulaw_quantize(self, data: dict[str, Any], n_bits: int = 8) -> dict[str, Any]:
-        """
-        Args:
-            data: Dictionary containing raw data and metadata
-            n_bits: Number of bits to use for quantization
+        """Args: data: Dictionary containing raw data and metadata n_bits: Number of
+        bits to use for quantization.
 
-        Returns:
-            Dictionary containing quantized data
+        Returns:     Dictionary containing quantized data
         """
         # first do max scaling for the data to be in -1, 1 range
         max_val = np.max(np.abs(data["raw_array"]))
@@ -369,3 +530,60 @@ class Ephys(Preprocessing):
 
         data["raw_array"] = quant
         return data
+
+    @staticmethod
+    def decode_predictive_tokens(
+        tokens: np.ndarray,
+        *,
+        scale: float | np.ndarray = 1.0,
+        mu: int = 255,
+    ) -> np.ndarray:
+        """Inverse µ-law tokens and integrate predictor residuals."""
+        return predictive_mulaw_decode(tokens, scale=scale, mu=int(mu))
+
+    # Override stage-3 chunk quantization to use predictor residuals + µ-law
+    def _quantize_chunks(self, src_dir: str, dst_dir: str, chunk_files: list[str]):
+        """Quantize chunks using predictive residuals + µ-law compression."""
+        residuals: list[np.ndarray] = []
+        chunk_records: list[tuple[str, dict[str, Any], np.ndarray]] = []
+
+        for chunk_name in chunk_files:
+            chunk_path = Path(src_dir) / chunk_name
+            try:
+                chunk = np.load(chunk_path, allow_pickle=True).item()
+            except Exception as exc:  # pragma: no cover - IO errors logged
+                print(f"WARNING: Failed to load {chunk_path}: {exc}")
+                continue
+
+            if not isinstance(chunk, dict) or "data" not in chunk:
+                print(f"WARNING: {chunk_path} missing 'data'; skipping")
+                continue
+
+            data = np.asarray(chunk["data"], dtype=np.float32)
+            residual = predictive_residual_encode(data)
+            residuals.append(residual)
+            chunk_records.append((chunk_name, chunk, residual))
+
+        if not residuals:
+            print("INFO: No valid chunks to quantize.")
+            return
+
+        residual_cat = np.concatenate(residuals, axis=-1)
+
+        # print percentage of residuals clipped
+        n_clipped = np.sum(np.abs(residual_cat) > self.residual_scale)
+        print(f"INFO: {n_clipped / residual_cat.size * 100:.2f}% of residuals clipped")
+
+        for chunk_name, chunk, residual in chunk_records:
+            res_norm = residual / self.residual_scale
+            res_norm = np.clip(res_norm, -0.99, 0.99)
+            # quant, recon = mulaw(res_norm, mu)
+            quant = quantize_deadzone_linear(res_norm, 0.01, bins=self.text_num_bins)
+
+            chunk["data"] = quant.astype(np.uint8, copy=False)
+            chunk["residual_scale"] = self.residual_scale
+            # chunk["mulaw_mu"] = int(mu)
+            # chunk["mulaw_mse"] = float(np.mean((res_norm - recon) ** 2))
+
+            out_path = Path(dst_dir) / chunk_name
+            np.save(out_path, chunk)

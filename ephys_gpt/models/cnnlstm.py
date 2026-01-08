@@ -1,32 +1,17 @@
 import torch
 import torch.nn as nn
-from typing import Literal, Optional, Type
+from typing import Literal, Optional
+
 from ..layers.transformer_blocks import TransformerBlock
-
-
-class ChannelLastLayerNorm(nn.Module):
-    """
-    LayerNorm over channels for (N, C, T) tensors without permanent permutes.
-    """
-
-    def __init__(self, num_channels: int, eps: float = 1e-5):
-        super().__init__()
-        self.ln = nn.LayerNorm(num_channels, eps=eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (N, C, T)
-        x = x.transpose(1, 2)  # (N, T, C)
-        x = self.ln(x)
-        return x.transpose(1, 2)  # (N, C, T)
+from ..layers.conv import ConvBlock1D
+from ..layers.norms import ChannelLastLayerNorm
 
 
 class PerExampleChannelNorm1D(nn.Module):
-    """
-    Normalize each example and channel across time (B, C, T).
+    """Normalize each example and channel across time (B, C, T).
 
-    For every sample b and channel c, computes
-        x[b,c,:] = (x[b,c,:] - mean_t) / sqrt(var_t + eps)
-    where statistics are taken over the time dimension only.
+    For every sample b and channel c, computes     x[b,c,:] = (x[b,c,:] - mean_t) /
+    sqrt(var_t + eps) where statistics are taken over the time dimension only.
     """
 
     def __init__(self, eps: float = 1e-5):
@@ -45,141 +30,11 @@ class PerExampleChannelNorm1D(nn.Module):
         return x
 
 
-def _choose_gn_groups(requested: int, num_channels: int) -> int:
-    # pick the largest divisor of num_channels not exceeding requested
-    g = min(requested, num_channels)
-    while g > 1 and (num_channels % g) != 0:
-        g -= 1
-    return max(1, g)
-
-
-def make_norm(
-    norm_type: Literal["group", "batch", "layer"],
-    num_channels: int,
-    *,
-    gn_groups: int = 16,
-    eps: float = 1e-5,
-) -> nn.Module:
-    if norm_type == "batch":
-        return nn.BatchNorm1d(num_channels, eps=eps)
-    elif norm_type == "layer":
-        # LayerNorm expects normalized last dim -> we wrap it for (N, C, T) input
-        return ChannelLastLayerNorm(num_channels, eps=eps)
-    else:  # "group"
-        g = _choose_gn_groups(gn_groups, num_channels)
-        return nn.GroupNorm(g, num_channels, eps=eps)
-
-
-class SE1D(nn.Module):
-    """Squeeze-and-Excitation for (B, C, T)."""
-
-    def __init__(self, channels: int, reduction: int = 8):
-        super().__init__()
-        hidden = max(1, channels // reduction)
-        self.pool = nn.AdaptiveAvgPool1d(1)  # squeeze over time
-        self.fc = nn.Sequential(
-            nn.Linear(channels, hidden, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, channels, bias=True),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, T)
-        z = self.pool(x).squeeze(-1)  # (B, C)
-        w = self.fc(z).unsqueeze(-1)  # (B, C, 1)
-        return x * w  # broadcast over T
-
-
-class ECA1D(nn.Module):
-    """Efficient Channel Attention for (B, C, T). No MLP."""
-
-    def __init__(self, channels: int, k: int = 3):
-        super().__init__()
-        k = k if k % 2 == 1 else k + 1  # ensure odd
-        self.pool = nn.AdaptiveAvgPool1d(1)  # (B, C, 1)
-        # conv over channel dimension: reshape to (B, 1, C)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k, padding=k // 2, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.pool(x)  # (B, C, 1)
-        y = y.transpose(1, 2)  # (B, 1, C)
-        y = self.conv(y)  # (B, 1, C)
-        y = torch.sigmoid(y).transpose(1, 2)  # (B, C, 1)
-        return x * y
-
-
-class ConvBlock1D(nn.Module):
-    """
-    Residual 1D conv block with Conv -> Norm -> Act -> Drop -> (ChAttn) -> + Residual.
-    Residual path matches channels and stride. padding='same'.
-    """
-
-    def __init__(
-        self,
-        in_ch: int,
-        out_ch: int,
-        kernel_size: int,
-        stride: int = 1,
-        norm: Literal["group", "batch", "layer"] = "group",
-        gn_groups: int = 16,
-        dropout: float = 0.0,
-        activation: Type[nn.Module] = nn.GELU,
-        eps: float = 1e-5,
-        ch_attn: Optional[Literal["se", "eca"]] = "se",
-        se_reduction: int = 8,
-        eca_k: int = 3,
-        padding: bool = True,
-    ):
-        super().__init__()
-
-        self.conv = nn.Conv1d(
-            in_ch,
-            out_ch,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=kernel_size // 2 if padding else 0,
-            bias=False,
-        )
-        self.norm = make_norm(norm, out_ch, gn_groups=gn_groups, eps=eps)
-        self.act = activation()
-        self.drop = nn.Dropout1d(p=dropout)
-
-        # Optional channel attention on the main path output
-        if ch_attn is None:
-            self.ch_attn = None
-        elif ch_attn == "se":
-            self.ch_attn = SE1D(out_ch, reduction=se_reduction)
-        elif ch_attn == "eca":
-            self.ch_attn = ECA1D(out_ch, k=eca_k)
-        else:
-            raise ValueError(f"Unknown ch_attn: {ch_attn}")
-
-        # Residual path matches channels and stride
-        if in_ch != out_ch or stride != 1:
-            self.residual = nn.Conv1d(
-                in_ch, out_ch, kernel_size=1, stride=stride, padding=0, bias=False
-            )
-        else:
-            self.residual = nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        res = self.residual(x)
-        x = self.conv(x)
-        x = self.norm(x)
-        x = self.act(x)
-        x = self.drop(x)
-        if self.ch_attn is not None:
-            x = self.ch_attn(x)
-        return x + res
-
-
 class AttentionPool1D(nn.Module):
-    """
-    Lightweight additive attention pooling over time without einsum.
-    Input:  x (B, T, D)
-    Output: (B, D)
-    Optional mask: (B, T) with 1 for valid, 0 for padded (if you ever need it).
+    """Lightweight additive attention pooling over time without einsum.
+
+    Input:  x (B, T, D) Output: (B, D) Optional mask: (B, T) with 1 for valid, 0 for
+    padded (if you ever need it).
     """
 
     def __init__(self, d_model: int, hidden: int = 128, dropout: float = 0.1):
@@ -325,15 +180,11 @@ class CNNLSTM(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the network.
 
-        Parameters
-        ----------
-        inputs : torch.Tensor
-            Input tensor of shape (batch_size, input_channels, sequence_length)
+        Parameters ---------- inputs : torch.Tensor     Input tensor of shape
+        (batch_size, input_channels, sequence_length)
 
-        Returns
-        -------
-        output : torch.Tensor
-            - Output tensor of shape (batch_size, num_gestures, sequence_length)
+        Returns ------- output : torch.Tensor     - Output tensor of shape (batch_size,
+        num_gestures, sequence_length)
         """
         sigma_k = None
         if isinstance(x, tuple) or isinstance(x, list):
@@ -422,7 +273,7 @@ class CNNLSTM(nn.Module):
                     nn.init.zeros_(param)
                     # Set forget gate bias to 1
                     hidden_size = param.shape[0] // 4
-                    param.data[hidden_size : 2 * hidden_size].fill_(1.0)
+                    param.data[hidden_size: 2 * hidden_size].fill_(1.0)
 
 
 class CNNLSTMSimple(nn.Module):
@@ -575,17 +426,15 @@ class Wavenet3DLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Args:
-        x: (B, C, H, W, T)
-        c: optional conditioning, (B, Cc, H, W, T) or broadcastable
-        causal_pad: whether to apply causal left padding in time
-        Returns:
-            residual_out: (B, C_res, H, W, T)
-            skip: (B, C_skip, H, W, T)
+
+        x: (B, C, H, W, T) c: optional conditioning, (B, Cc, H, W, T) or broadcastable
+        causal_pad: whether to apply causal left padding in time Returns:
+        residual_out: (B, C_res, H, W, T)     skip: (B, C_skip, H, W, T)
         """
         x_dilated = self.conv_dilation(x)
 
         x_filter = torch.tanh(x_dilated[:, : self.dilation_channels])
-        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels :])
+        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels:])
         x_h = x_gate * x_filter
 
         skip = self.conv_skip(x_h)
@@ -594,7 +443,7 @@ class Wavenet3DLayer(nn.Module):
         if self.conv_input is not None:
             x = self.conv_input(x)
 
-        out = x[..., -res.shape[-1] :] + res
+        out = x[..., -res.shape[-1]:] + res
 
         out = self.dropout(out)
         return out, skip
@@ -628,12 +477,12 @@ class Wavenet3DClassifier(nn.Module):
     """WaveNet-style model operating on 3D volumes over time.
 
     Expects inputs shaped as (B, C, H, W, T), where C is the channel/embedding
-    dimension. The network performs causal convolutions along the temporal
-    axis using 3D convolutions with kernel size (1, 1, k), so spatial
-    dimensions are preserved while receptive field grows only in time.
+    dimension. The network performs causal convolutions along the temporal axis using 3D
+    convolutions with kernel size (1, 1, k), so spatial dimensions are preserved while
+    receptive field grows only in time.
 
-    The model mirrors the gating, residual, and skip-connection structure of a
-    classical WaveNet, but generalized to 3D.
+    The model mirrors the gating, residual, and skip-connection structure of a classical
+    WaveNet, but generalized to 3D.
     """
 
     def __init__(
@@ -697,11 +546,10 @@ class Wavenet3DClassifier(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Args:
-        x: (B, H, W, T)
-        condition: optional conditioning tensor broadcastable to (B, Cc, H, W, T)
-        causal_pad: whether to apply causal left padding on temporal axis
-        Returns:
-            logits: (B, out_channels, H, W, T)
+
+        x: (B, H, W, T) condition: optional conditioning tensor broadcastable to (B, Cc,
+        H, W, T) causal_pad: whether to apply causal left padding on temporal axis
+        Returns:     logits: (B, out_channels, H, W, T)
         """
 
         skips: list[torch.Tensor] = []

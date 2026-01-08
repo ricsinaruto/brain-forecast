@@ -1,8 +1,10 @@
 from .evalquant import EvalQuant
 from .evaldiffusion import EvalDiffusion
 from .evalflow import EvalFlow
-from .evalbendr import EvalBENDR
+from .evalcont import EvalCont
 from .evalvq import EvalVQ
+from .evalflat import EvalFlat
+from .evalflat import EvalText
 
 __all__ = [
     "EvalQuant",
@@ -10,4 +12,7 @@ __all__ = [
     "EvalFlow",
     "EvalBENDR",
     "EvalVQ",
+    "EvalCont",
+    "EvalFlat",
+    "EvalText",
 ]

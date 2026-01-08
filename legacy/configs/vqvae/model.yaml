@@ -1,0 +1,15 @@
+config:
+  input_dim: 68
+  hidden_dims: [128, 256, 512]
+  latent_dim: 512
+  codebook_size: 1024
+  activation: silu
+  input_norm: null
+  bypass_quantizer: false
+  pre_quant_norm: true
+  codebook_init_std: 0.2
+  beta: 0.1
+  recon_loss: mse
+  use_ema: true
+  reset_unused_codes: false
+  usage_threshold: 1.0

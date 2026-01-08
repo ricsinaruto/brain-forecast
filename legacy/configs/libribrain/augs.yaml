@@ -1,0 +1,4 @@
+RandomTimeMask:
+  num_blocks: 2
+  block_len: 25
+  p: 0.5

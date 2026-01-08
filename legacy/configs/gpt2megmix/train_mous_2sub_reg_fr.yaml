@@ -1,0 +1,67 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/gpt2megmix/model68_small_reg.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/mous/2sub/1to50hz_ss/gpt2megmix_reg_fr/
+resume_from: null
+
+model_name: GPT2MEGMix
+loss_name: CrossEntropy
+
+datasplitter:
+  dataset_class: ChunkDataset
+  dataset_root: "/vol/data/datasets/MOUS/preprocessed_ss"
+  example_seconds: 2.0
+  overlap_seconds: 1.0
+  val_ratio: 0.33
+  test_ratio: 0.0
+  dataset_kwargs:
+    fill_value: 127
+    has_condition: true
+
+dataloader:
+  batch_size: 128
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+k_step_free_run:
+  enabled: true
+  warmup_range: [280, 360]   # ~1.4–1.8s context at 200 Hz
+  rollout_range: [60, 100]   # ~0.3–0.5s free-run
+  sample_strategy: sample
+  temperature: 0.9
+  log_lengths: true
+
+loss:
+  label_smoothing: 0.05
+  l1: 0.0
+
+lightning:
+  lr: 4.0e-4
+  weight_decay: 0.02
+  compile: true
+  log_samples: false
+  log_psd: False
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-5
+    T_max: 120
+
+trainer:
+  max_epochs: 120
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 100
+  precision: 16-mixed
+  gradient_clip_val: 10.0

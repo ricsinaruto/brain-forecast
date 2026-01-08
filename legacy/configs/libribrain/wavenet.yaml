@@ -1,0 +1,10 @@
+in_channels: 1
+kernel_size: 3
+dilations: [1, 2, 4, 8, 16, 32, 64, 1, 2, 4, 8, 16, 32, 64]
+residual_channels: 32
+dilation_channels: 32
+head_channels: 32
+skip_channels: 64
+spatial_kernel_size: 3
+spatial_dilation: 1
+cond_channels: null

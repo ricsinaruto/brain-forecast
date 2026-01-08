@@ -1,5 +1,6 @@
 from .classification import (
     CrossEntropy,
+    CrossEntropySpectral,
     CrossEntropyWithCodes,
     CrossEntropyWeighted,
     CrossEntropyBalanced,
@@ -8,17 +9,24 @@ from .classification import (
 from .diffusion import NTDLoss
 from .reconstruction import (
     MSE,
-    BrainTokenizerLoss,
     VQNSPLoss,
     NLL,
     VQVAELoss,
     ChronoFlowLoss,
+    SpectralLoss,
+    VQVAEHF,
 )
+from .cosmos import CosmosTokenizerLoss
+from .brainomni import (
+    BrainOmniCausalTokenizerLoss,
+    BrainOmniCausalForecastLoss,
+)
+from .ibq import IBQSimpleLoss, VQLPIPSWithDiscriminator
 
 __all__ = [
     "CrossEntropy",
+    "CrossEntropySpectral",
     "MSE",
-    "BrainTokenizerLoss",
     "CrossEntropyWithCodes",
     "NTDLoss",
     "VQNSPLoss",
@@ -28,4 +36,11 @@ __all__ = [
     "ChronoFlowLoss",
     "CrossEntropyBalanced",
     "CrossEntropyMasked",
+    "SpectralLoss",
+    "BrainOmniCausalTokenizerLoss",
+    "BrainOmniCausalForecastLoss",
+    "CosmosTokenizerLoss",
+    "VQVAEHF",
+    "IBQSimpleLoss",
+    "VQLPIPSWithDiscriminator",
 ]

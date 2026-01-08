@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 
 from ..layers.st_blocks import TASA3DBlock
+from ..layers.conv import time_group_norm
 
 
 class TASA3D(nn.Module):
-    """
-    Stacks TASA-3D blocks; outputs categorical(256) logits per pixel.
+    """Stacks TASA-3D blocks; outputs categorical(256) logits per pixel.
+
     Causality: only temporal attention mixes in T; all spatial ops use k_t=1.
     """
 
@@ -22,6 +23,7 @@ class TASA3D(nn.Module):
         drop: float = 0.0,
         rope: bool = True,
         n_cond_tok: int = 0,
+        spatial_emb: bool = False,
     ):
         super().__init__()
         self.token = nn.Embedding(quant_levels, emb_dim)
@@ -35,6 +37,7 @@ class TASA3D(nn.Module):
                     heads=heads,
                     rope=rope,
                     drop=drop,
+                    use_spatial_emb=spatial_emb,
                 )
                 for _ in range(depth)
             ]
@@ -47,12 +50,9 @@ class TASA3D(nn.Module):
             self.emb_tok = nn.Embedding(n_cond_tok, emb_dim)
 
     def _apply_conditioning(self, x: torch.Tensor, cond: torch.Tensor):
-        """
-        Args:
-            x: [B,H,W,T,D]
-            cond: [B,1,1,T]
-        Returns:
-            [B,H,W,T,D]
+        """Args:
+
+        x: [B,H,W,T,D]     cond: [B,1,1,T] Returns:     [B,H,W,T,D]
         """
         B, H, W, T, D = x.shape
 
@@ -80,6 +80,6 @@ class TASA3D(nn.Module):
 
         for blk in self.blocks:
             x = blk(x)  # temporal-only attention inside
-        x = self.norm(x)
+        x = time_group_norm(self.norm, x)
         logits = self.head(x)  # [B,256,T,H,W]
         return logits.permute(0, 3, 4, 2, 1).contiguous()  # [B,H,W,T,256]

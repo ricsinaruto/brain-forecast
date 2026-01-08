@@ -64,9 +64,8 @@ def apply_rope_1d(q, k, inv_freq, pos_start, L):
 
 
 class Embeddings(Module):
-    """
-    Handles various embeddings for conditioning, quantization, channels, and subjects.
-    """
+    """Handles various embeddings for conditioning, quantization, channels, and
+    subjects."""
 
     def __init__(
         self,
@@ -104,21 +103,16 @@ class Embeddings(Module):
         cond: Optional[Tensor] = None,
         sid: Optional[Tensor] = None,
     ) -> Tensor:
-        """
-        Args:
-            x: Input tensor of shape (B, C, T)
-            ids: Channel IDs of shape (C,)
-            cond: Conditional tensor of shape (B, 1, T)
-            sid: Subject IDs of shape (B,)
+        """Args: x: Input tensor of shape (B, C, T) ids: Channel IDs of shape (C,) cond:
+        Conditional tensor of shape (B, 1, T) sid: Subject IDs of shape (B,)
 
-        Returns:
-            Output tensor of shape (B*C, T, E_q + E_ch + E_c + E_s)
+        Returns:     Output tensor of shape (B*C, T, E_q + E_ch + E_c + E_s)
         """
         # if x is a tuple, unpack it
         if isinstance(x, tuple) or isinstance(x, list):
             x, cond = x
 
-        _, channels, timesteps = x.shape[0], x.shape[1], x.shape[2]
+        channels, timesteps = x.shape[1], x.shape[2]
 
         # apply quantization embedding
         x = self.quant_emb(x)  # B x C x T x E_q
@@ -183,7 +177,7 @@ class RotaryEmbedding(Module):
     def _compute_concentration_and_inv_freq(
         self, device: torch.device | None = None
     ) -> torch.Tensor:
-        """See YaRN paper: https://arxiv.org/abs/2309.00071"""
+        """See YaRN paper: https://arxiv.org/abs/2309.00071."""
         freq = self.base ** (
             torch.arange(0, self.head_dim, 2, dtype=torch.float, device=device)
             / self.head_dim

@@ -1,0 +1,47 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/megformer/model_mous.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/mous/2sub/1to50hz_causal/megformer
+resume_from: null
+
+model_name: MEGFormer
+loss_name: NLL
+eval_class: EvalFlow
+
+datasplitter:
+  dataset_class: ChunkDatasetImageReconstruction
+  dataset_root: "/vol/data/datasets/MOUS/preprocessed_1to50hz_causal_cont"
+  example_seconds: 1.0
+  overlap_seconds: 0.5
+  val_ratio: 0.0
+  test_ratio: 0.33
+  dataset_kwargs:
+    has_condition: true
+
+dataloader:
+  batch_size: 128  # 128
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: false
+  use_test_dataset: true
+  future_steps: 10
+  unroll_steps: 100
+  gen_seconds: 600
+  gen_sampling: top_p
+  channel_shape: [32, 32]
+  num_channels: 273
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/mous/2sub/1to50hz_causal/megformer/lightning_logs/version_14/checkpoints/best-checkpoint.ckpt

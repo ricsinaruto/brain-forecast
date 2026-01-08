@@ -4,16 +4,12 @@ import scipy.signal as signal
 
 
 def plot_psd(data: np.ndarray, sfreq: float, prefix: str) -> plt.Figure:
-    """
-    Plot the PSD of the data.
+    """Plot the PSD of the data.
 
-    Args:
-        data: Array of shape (C, T) containing the data
-        sfreq: Sampling frequency
-        prefix: Prefix for the filenames
+    Args:     data: Array of shape (C, T) containing the data     sfreq: Sampling
+    frequency     prefix: Prefix for the filenames
 
-    Returns:
-        fig: Figure object
+    Returns:     fig: Figure object
     """
     # Use Welch's method for a smoother PSD estimate
     # Choose segment length up to 1024 samples or full length if shorter

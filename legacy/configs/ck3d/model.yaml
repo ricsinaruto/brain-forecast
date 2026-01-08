@@ -1,0 +1,4 @@
+emb_dim: 64
+channels: 64
+depth: 24
+heads: 8

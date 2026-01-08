@@ -1,0 +1,21 @@
+num_channels: 68
+vocab_size: 256
+d_model: 544
+num_layers: 8
+channel_dropout_p: 0.1
+quant_emb: 8
+attn_type: standard
+mlp_type: standard
+
+embedding_args:
+  class_emb: 8
+  num_classes: 6
+
+attn_args:
+  d_model: 544
+  nheads: 16
+  dropout: 0.2
+  rope: true
+
+mlp_args:
+  d_model: 544

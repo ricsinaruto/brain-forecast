@@ -1,37 +1,21 @@
 import torch
 import torch.nn as nn
 
-from .gpt2meg import GPT2MEG, STGPT2MEG, GPT2MEGMix
-from .brainomni import BrainOmniSystem
 from .ntd import NTD
 from .bendr import BENDRForecast
-from .megformer import MEGFormer
-from .gpt2meg import VQGPT2MEG
-from .litra import LITRA
 from .wavenet import WavenetFullChannel, Wavenet3D
-from .taca import TACA
 from .tasa3d import TASA3D
-from .ck3d import CK3D
 from .cnnlstm import CNNLSTM
 
 
 def get_model_class(model_name: str):
     """Get model class by name."""
     model_classes = {
-        "GPT2MEG": GPT2MEG,
-        "STGPT2MEG": STGPT2MEG,
-        "GPT2MEGMix": GPT2MEGMix,
-        "BrainOmniSystem": BrainOmniSystem,
         "NTD": NTD,
         "BENDRForecast": BENDRForecast,
-        "MEGFormer": MEGFormer,
-        "VQGPT2MEG": VQGPT2MEG,
-        "LITRA": LITRA,
         "WavenetFullChannel": WavenetFullChannel,
         "Wavenet3D": Wavenet3D,
-        "TACA": TACA,
         "TASA3D": TASA3D,
-        "CK3D": CK3D,
         "CNNLSTM": CNNLSTM,
     }
     if model_name not in model_classes:
@@ -40,9 +24,8 @@ def get_model_class(model_name: str):
 
 
 class ClassifierContinuous(nn.Module):
-    """
-    Generic model that adds an extra classification head to a base forecasting model.
-    """
+    """Generic model that adds an extra classification head to a base forecasting
+    model."""
 
     def __init__(self, base_model_name: str, model_args: dict, num_classes: int):
         super().__init__()
@@ -60,9 +43,8 @@ class ClassifierContinuous(nn.Module):
 
 
 class ClassifierQuantized(nn.Module):
-    """
-    Generic model that adds an extra classification head to a base forecasting model.
-    """
+    """Generic model that adds an extra classification head to a base forecasting
+    model."""
 
     def __init__(
         self,
@@ -92,9 +74,8 @@ class ClassifierQuantized(nn.Module):
 
 
 class ClassifierQuantizedImage(ClassifierQuantized):
-    """
-    Generic model that adds an extra classification head to a base forecasting model.
-    """
+    """Generic model that adds an extra classification head to a base forecasting
+    model."""
 
     def __init__(
         self,

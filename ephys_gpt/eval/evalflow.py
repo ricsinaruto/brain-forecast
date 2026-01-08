@@ -9,11 +9,10 @@ DEBUG = False
 
 
 class EvalFlow(EvalQuant):
-    """Evaluation for MEGFormer image‑based autoregressive model.
-    TODO: not tested
+    """Evaluation for MEGFormer image‑based autoregressive model. TODO: not tested.
 
-    Maps image forecasts back to channel space via dataset pixel indices and
-    computes the same metrics (MSE curves) as the GPT2MEG evaluation.
+    Maps image forecasts back to channel space via dataset pixel indices and computes
+    the same metrics (MSE curves) as the GPT2MEG evaluation.
     """
 
     def _get_max_hist(self) -> int:  # type: ignore[override]
@@ -30,7 +29,7 @@ class EvalFlow(EvalQuant):
         col_idx = torch.as_tensor(
             getattr(self.test_dataset, "col_idx"), device=img.device
         )
-        B, H, W, T = img.shape
+
         # gather per time slice
         out = img[:, row_idx, col_idx, :]  # (B,C,T)
         return out
@@ -53,11 +52,11 @@ class EvalFlow(EvalQuant):
             for t in range(1, T):
                 max_h = min(H, t)
                 for h in range(1, max_h + 1):
-                    ctx = img[..., t - h : t]
+                    ctx = img[..., t - h: t]
                     # forecast 1 step
                     pred_img = self.model.forecast(ctx, steps=1)[..., -1:]
                     pred = self._images_to_channels(pred_img)[..., -1]  # (B,C)
-                    gt = self._images_to_channels(img[..., t : t + 1])[..., -1]
+                    gt = self._images_to_channels(img[..., t: t + 1])[..., -1]
                     mse_hist[:, h - 1] += ((pred - gt) ** 2).sum(dim=0)
                     counts[h - 1] += B
 
@@ -94,10 +93,10 @@ class EvalFlow(EvalQuant):
             if T <= N:
                 continue
             for t in range(ctx_len, T - N + 1):
-                ctx = img[..., t - ctx_len : t]
+                ctx = img[..., t - ctx_len: t]
                 pred_imgs = self.model.forecast(ctx, steps=N)[..., -N:]  # (B,H,W,N)
                 pred = self._images_to_channels(pred_imgs)  # (B,C,N)
-                gt = self._images_to_channels(img[..., t : t + N])  # (B,C,N)
+                gt = self._images_to_channels(img[..., t: t + N])  # (B,C,N)
                 mse_horizon += ((pred - gt) ** 2).sum(dim=0)
                 counts += B
                 if DEBUG and t > ctx_len + 10:
@@ -123,8 +122,10 @@ class EvalFlow(EvalQuant):
 
         gen = self.model.forecast(ctx, steps=total_steps)
 
+        print(gen.shape)
+
         # remove input context
-        gen = gen[..., ctx.shape[-1] :]
+        gen = gen[..., ctx.shape[-1]:]
 
         chans = self._images_to_channels(gen).squeeze(0).cpu().numpy()
         np.save(self.out_dir / "generated.npy", chans)

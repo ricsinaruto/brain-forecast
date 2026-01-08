@@ -2,11 +2,10 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from einops import rearrange
-import torch.nn.functional as F
-import numpy as np
 
 from .attention import AttentionBlock, MultiHeadAttention, MultiHeadAttentionGPTOSS
 from .transformer_blocks import MLP, MLPMoE
+from .conv import Conv3dBlock, DownStage3D, UpStage3D, time_group_norm
 
 
 class STBlock(nn.Module):
@@ -141,93 +140,6 @@ class STGPTBlockParallel(nn.Module):
         return x
 
 
-class Conv3dBlock(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        kT: int,
-        kH: int,
-        kW: int,
-        image_size: int,
-        dropout: float,
-        row_idx: torch.Tensor | None = None,
-        col_idx: torch.Tensor | None = None,
-    ):
-        super().__init__()
-        self.H = image_size
-        self.W = image_size
-        self.kT = kT
-        self.kH = kH
-        self.kW = kW
-
-        # if row and col idx is none, load from tmp file
-        tensors = np.load("tmp/img_inds.npy", allow_pickle=True).item()
-        row_idx = torch.from_numpy(tensors["row_idx"])
-        col_idx = torch.from_numpy(tensors["col_idx"])
-
-        assert row_idx.shape == col_idx.shape
-        self.register_buffer("row_idx", row_idx.long())
-        self.register_buffer("col_idx", col_idx.long())
-
-        self.conv3d = nn.Conv3d(
-            in_channels=d_model,
-            out_channels=d_model,
-            kernel_size=(kT, kH, kW),
-            stride=1,
-            padding=0,  # we will pad manually to enforce causal time
-            bias=True,
-        )
-        self.pw = nn.Conv3d(d_model, d_model, kernel_size=1, bias=True)
-        self.gn = nn.GroupNorm(d_model // 8, d_model)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout)
-
-    def _to_grid(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, C, T, M) -> y: (B, M, T, H, W)
-        Places each sensor m at (row_idx[m], col_idx[m]) across the H×W grid.
-        """
-        B, C, T, M = x.shape
-
-        x = rearrange(x, "b c t m -> b m t c")
-
-        y = x.new_zeros((B, M, T, self.H, self.W))
-        # Advanced indexing will produce a (B,C,T,M) view on the RHS
-        y[..., self.row_idx, self.col_idx] = x
-        return y
-
-    def _from_grid(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        y: (B, M, T, H, W) -> x: (B, M, T, C)
-        Gathers sensor positions back from the grid.
-        """
-
-        y = y[..., self.row_idx, self.col_idx]  # (B,M,T,C)
-        y = rearrange(y, "b m t c -> b c t m")
-        return y
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply causal 3D conv over (T,H,W) with channels=M.
-        Causality enforced by left-padding T by (kT-1) and symmetric padding on H/W.
-        """
-        x = self._to_grid(x)
-
-        pad_t = self.kT - 1
-        pad_h = self.kH // 2
-        pad_w = self.kW // 2
-        # F.pad order for 5D: (W_left, W_right, H_top, H_bottom, D_front, D_back)
-        y = F.pad(x, (pad_w, pad_w, pad_h, pad_h, pad_t, 0))
-        y = self.conv3d(y)
-        y = self.gn(y)
-        y = self.act(y)
-        y = self.pw(y)
-        y = self.drop(y)
-        y = y + x
-
-        return self._from_grid(y)
-
-
 class STConvBlock(STGPTBlock):
     def __init__(
         self,
@@ -241,23 +153,17 @@ class STConvBlock(STGPTBlock):
         conv_kernel: tuple[int, int, int] = (3, 3, 3),
         dropout: float = 0.0,
     ):
-        """
-        Spatial‑Temporal GPT block with an extra causal 3D conv between temporal and
+        """Spatial‑Temporal GPT block with an extra causal 3D conv between temporal and
         spatial attention. The conv operates on a rasterised grid using the
         channel→(H,W) mapping from ChunkDatasetImage.
 
-        Args:
-            attn_args: Arguments for AttentionBlock.
-            mlp_args: Arguments for MLP/MLPMoE.
-            attn_type: Attention implementation to use.
-            mlp_type: "standard" or "moe".
-            image_size: H and W of the raster grid.
-            row_idx: LongTensor of shape (C,) mapping channel→row.
-            col_idx: LongTensor of shape (C,) mapping channel→col.
-            conv_kernel: (kT, kH, kW) kernel size for 3D conv.
-            conv_groups: Groups for 3D conv. If None, defaults to depthwise
-                         (groups=d_model).
-            dropout: Dropout after the conv block.
+        Args:     attn_args: Arguments for AttentionBlock.     mlp_args: Arguments for
+        MLP/MLPMoE.     attn_type: Attention implementation to use.     mlp_type:
+        "standard" or "moe".     image_size: H and W of the raster grid.     row_idx:
+        LongTensor of shape (C,) mapping channel→row.     col_idx: LongTensor of shape
+        (C,) mapping channel→col.     conv_kernel: (kT, kH, kW) kernel size for 3D conv.
+        conv_groups: Groups for 3D conv. If None, defaults to depthwise
+        (groups=d_model).     dropout: Dropout after the conv block.
         """
         super().__init__(attn_args, mlp_args, attn_type, mlp_type)
 
@@ -277,121 +183,16 @@ class STConvBlock(STGPTBlock):
         return super().forward(x)
 
 
-class CrissCrossBlock(nn.Module):
-    def __init__(
-        self,
-        attn_args: dict,
-        mlp_ratio: float = 4.0,
-        dropout: float = 0.0,
-        attn_type: str = "standard",
-    ) -> None:
-        super().__init__()
-        if attn_type == "standard":
-            attn_class = MultiHeadAttention
-        elif attn_type == "gpt_oss":
-            attn_class = MultiHeadAttentionGPTOSS
-        else:
-            raise ValueError(f"Invalid attention type: {attn_type}")
-
-        dim = attn_args["d_model"]
-        attn_args_spatial = attn_args.copy()
-        attn_args_spatial["d_model"] = dim // 2
-        attn_args_spatial["nheads"] = attn_args["nheads"] // 2
-
-        self.spatial_attn = attn_class(**attn_args_spatial)
-
-        attn_args_temporal = attn_args.copy()
-        attn_args_temporal["d_model"] = dim - attn_args_spatial["d_model"]
-        self.temporal_attn = attn_class(**attn_args_temporal)
-
-        self.norm1 = nn.RMSNorm(dim)
-        self.norm2 = nn.RMSNorm(dim)
-
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x: torch.Tensor, T: int) -> torch.Tensor:
-        """x: (B, S, D) where S = C_latent × T.  We need T to reshape.
-        causal_mask: (T, T) bool – for temporal heads only."""
-        B, S, D = x.shape
-        C_latent = S // T
-
-        h = self.norm1(x)
-        x1, x2 = torch.split(
-            h, [D // 2, D - D // 2], dim=-1
-        )  # (B, S, half) & (B, S, rest)
-        # Spatial – group by time to attend across channels
-        x1_reshaped = (
-            x1.view(B, C_latent, T, -1).transpose(1, 2).reshape(B * T, C_latent, -1)
-        )
-        s_out = self.spatial_attn(x1_reshaped, x1_reshaped, x1_reshaped, causal=False)
-        s_out = s_out.view(B, T, C_latent, -1).transpose(1, 2).reshape(B, S, -1)
-
-        # Temporal – group by channel to attend causally across time
-        x2_reshaped = x2.view(B, C_latent, T, -1).reshape(B * C_latent, T, -1)
-
-        t_out = self.temporal_attn(x2_reshaped, x2_reshaped, x2_reshaped, causal=True)
-        t_out = t_out.view(B, C_latent, T, -1).reshape(B, S, -1)
-
-        x = x + torch.cat([s_out, t_out], dim=-1)
-        x = x + self.mlp(self.norm2(x))  # feed‑forward
-        return x
-
-
-class DownStage(nn.Module):
-    """Spatial downsample by 2x, no temporal mixing."""
-
-    def __init__(self, C_in, C_out):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv3d(
-                C_in, C_out, kernel_size=(1, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1)
-            ),
-            nn.GroupNorm(1, C_out),
-            nn.GELU(),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class UpStage(nn.Module):
-    """Spatial upsample by 2x via transposed conv, no temporal mixing."""
-
-    def __init__(self, C_in, C_out):
-        super().__init__()
-        # kernel 4, stride 2, pad 1 gives clean 2x upsample in H/W with T unchanged
-        self.net = nn.Sequential(
-            nn.ConvTranspose3d(
-                C_in, C_out, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1)
-            ),
-            nn.GroupNorm(1, C_out),
-            nn.GELU(),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
 class TASA3DBlock(nn.Module):
-    """
-    Temporal-only Attention with
-    Spatial Autoencoder (no time mixing in the encoder/decoder).
-    Workflow:
-      x [B,C,T,H,W]
-        -> stem (1x1x1) to base C
-        -> (Down x N): stride (1,2,2), channels may grow
-        -> flatten per T: [B,T, C_bot*H'*W'] = [B,T,D_flat]
-        -> causal temporal MHA (+ token-MLP)
-        -> reshape to [B,C_bot,T,H',W']
-        -> (Up x N): stride (1,2,2) back to input spatial size, channels shrink
-        -> out_proj (1x1x1), residual add to input (with projection if needed)
-    Constraints:
-      H and W must be divisible by 2**num_down.
+    """Temporal-only Attention with Spatial Autoencoder (no time mixing in the
+    encoder/decoder). Workflow:
+
+    x [B,C,T,H,W]     -> stem (1x1x1) to base C     -> (Down x N): stride (1,2,2),
+    channels may grow     -> flatten per T: [B,T, C_bot*H'*W'] = [B,T,D_flat]     ->
+    causal temporal MHA (+ token-MLP)     -> reshape to [B,C_bot,T,H',W']     -> (Up x
+    N): stride (1,2,2) back to input spatial size, channels shrink     -> out_proj
+    (1x1x1), residual add to input (with projection if needed) Constraints:   H and W
+    must be divisible by 2**num_down.
     """
 
     def __init__(
@@ -404,6 +205,7 @@ class TASA3DBlock(nn.Module):
         rope: bool = True,
         drop: float = 0.0,
         token_mlp_ratio: float = 4.0,
+        use_spatial_emb: bool = False,
     ):
         super().__init__()
         assert (
@@ -425,6 +227,12 @@ class TASA3DBlock(nn.Module):
         Cb = C_in * self.g**num_down
         self.D_attn = Cb * self.Hb * self.Wb
 
+        if use_spatial_emb:
+            # Learned bias per bottleneck spatial token, shared across batch/time.
+            self.spatial_emb = nn.Parameter(torch.randn(1, Cb, 1, self.Hb, self.Wb))
+        else:
+            self.register_parameter("spatial_emb", None)
+
         # Build channel schedule
         C_list = [C_in]
         for _ in range(num_down):
@@ -434,10 +242,10 @@ class TASA3DBlock(nn.Module):
 
         # Downs, ups
         self.downs = nn.ModuleList(
-            [DownStage(C_list[i], C_list[i + 1]) for i in range(num_down)]
+            [DownStage3D(C_list[i], C_list[i + 1]) for i in range(num_down)]
         )
         self.ups = nn.ModuleList(
-            [UpStage(C_list[i], C_list[i - 1]) for i in range(num_down, 0, -1)]
+            [UpStage3D(C_list[i], C_list[i - 1]) for i in range(num_down, 0, -1)]
         )
 
         # print(f"Attn dim: {self.D_attn}")
@@ -479,6 +287,9 @@ class TASA3DBlock(nn.Module):
         B, Cb, T, Hb, Wb = h.shape
         assert (Cb, Hb, Wb) == (self.C_list[-1], self.Hb, self.Wb)
 
+        if self.spatial_emb is not None:
+            h = h + self.spatial_emb
+
         # Flatten bottleneck per timestep -> tokens [B,T,D_attn]
         tokens = h.permute(0, 2, 1, 3, 4).contiguous().view(B, T, self.D_attn)
 
@@ -496,6 +307,6 @@ class TASA3DBlock(nn.Module):
             h = up(h)  # [B,C0,T,H0,W0]
 
         # Full-res conv-MLP & residual
-        h = h + self.mlp_full(self.norm_full(h))
+        h = h + self.mlp_full(time_group_norm(self.norm_full, h))
         y = self.out_proj(h) + x  # [B,C_in,T,H0,W0]
         return y

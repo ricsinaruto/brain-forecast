@@ -1,36 +1,40 @@
 from .datasets import (
     ChunkDataset,
     ChunkDatasetSensorPos,
-    ChunkDatasetImage,
     ChunkDatasetReconstruction,
+    ChunkDatasetSensor3D,
     ChunkDatasetImageQuantized,
     ChunkDatasetJIT,
     ChunkDatasetImage01,
-    ChunkDatasetMous,
     ChunkDatasetMasked,
     ChunkDatasetSubset,
-    ChunkDatasetCondition,
-    ChunkDatasetImageQuantizedCondition,
-    ChunkDatasetImageCondition,
+    ChunkDatasetForecastCont,
+    ChunkDatasetImageReconstruction,
+    ChunkDataset3D,
+    BPEDataset,
+    ChunkDatasetInterpolatedImage,
 )
-from .datasplitter import Split, split_datasets
-from .dataloaders import MixupDataLoader
+from .datasplitter import Split, split_datasets, split_datasets_libribrain
+from .dataloaders import MixupDataLoader, TextDataLoader
 
 __all__ = [
     "ChunkDataset",
-    "ChunkDatasetImage",
     "Split",
     "split_datasets",
+    "split_datasets_libribrain",
     "ChunkDatasetSensorPos",
     "ChunkDatasetReconstruction",
+    "ChunkDatasetSensor3D",
     "ChunkDatasetImageQuantized",
     "MixupDataLoader",
     "ChunkDatasetJIT",
     "ChunkDatasetImage01",
-    "ChunkDatasetMous",
     "ChunkDatasetMasked",
     "ChunkDatasetSubset",
-    "ChunkDatasetCondition",
-    "ChunkDatasetImageQuantizedCondition",
-    "ChunkDatasetImageCondition",
+    "ChunkDatasetForecastCont",
+    "ChunkDatasetImageReconstruction",
+    "ChunkDataset3D",
+    "BPEDataset",
+    "TextDataLoader",
+    "ChunkDatasetInterpolatedImage",
 ]

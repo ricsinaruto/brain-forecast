@@ -1,0 +1,10 @@
+in_channels: 1
+base_channels: 128
+channel_multiplier: [1, 2, 4]
+num_res_blocks: 2
+dropout: 0.0
+spatial_compression: 8
+temporal_compression: 4
+embedding_dim: 6
+levels: [8, 8, 8, 5, 5, 5]
+num_quantizers: 4

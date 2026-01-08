@@ -1,0 +1,45 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/brainomni/model.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni
+resume_from: null
+
+model_name: BrainOmniCausalForecast
+loss_name: BrainOmniCausalForecastLoss
+eval_class: EvalVQ
+
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_cont
+  example_seconds: 30
+  overlap_seconds: 10
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+dataloader:
+  batch_size: 4
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: false
+  use_test_dataset: false
+  future_steps: 10
+  unroll_steps: 1
+  gen_seconds: 1
+  gen_sampling: top_p
+  channel_shape: [272]
+  num_channels: 272
+  temperature: 1.0
+  top_p: 0.8
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni/lightning_logs/version_65/checkpoints/best-checkpoint.ckpt

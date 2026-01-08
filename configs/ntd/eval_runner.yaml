@@ -1,0 +1,53 @@
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 4
+datasplitter:
+  cache_dir: /vol/data/datasets/omega/full/cache/1to50hz_ss_cont_10.24s
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/omega/full/1to50hz_ss_cont
+  example_seconds: 10.24
+  overlap_seconds: 5
+  refresh_cache: false
+  test_ratio: 0.1
+  val_ratio: 0.1
+eval_runner:
+  ckpt_path: /vol/data/trainings/omega/1to50hz_ss/ntd/logs/version_3/checkpoints/last-checkpoint-epoch00015.ckpt
+  enabled: true
+  epoch: 16
+  generate:
+    enabled: true
+    kv_overlap: 20
+    num_runs: 1
+    seconds: 20
+  max_batches: 1000
+  modal_app: ephys-gpt
+  modal_function: runevals
+  num_examples: 5
+  step: 15861
+  use_modal: true
+  version: 3
+lightning:
+  compile: false
+  lr: 0.0002
+  lr_scheduler:
+    T_max: 100
+    class_name: CosineAnnealingLR
+    eta_min: 2.0e-05
+  weight_decay: 0.01
+loss_name: NTDLoss
+model_config: configs/ntd/model.yaml
+model_name: NTD
+resume_from: null
+save_dir: /vol/data/trainings/omega/1to50hz_ss/ntd/
+trainer:
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  checkpoint_cadence_epochs: 1
+  default_root_dir: /vol/data/trainings/omega/1to50hz_ss/ntd/
+  gradient_clip_val: 1.0
+  log_every_n_steps: 100
+  max_epochs: 100
+  precision: bf16-mixed

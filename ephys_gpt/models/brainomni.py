@@ -1,203 +1,47 @@
-"""brain_models.py
-
-PyTorch implementation of **BrainTokenizer** and **BrainOmni** (autoregressive
-forecasting variant) as described in *BrainOmni: A Brain Foundation Model for
-Unified EEG and MEG Signals* (Xiao *et al.* 2025).
-
-This file purposefully focuses *only* on model definitions – no data‑loading,
-training, or evaluation utilities are included.  Hyper‑parameters follow the
-paper when explicit, otherwise sensible defaults are provided and can be tuned
-externally.
-
-Both models are **device‑agnostic** and make minimal assumptions about input
-shape.
-
-Key architectural adaptations versus the original paper
-------------------------------------------------------
-* **BrainOmniForecast** – replaces masked‑token prediction with causal
-  *next‑token* forecasting (GPT‑style) over the discrete token stream emitted
-  by BrainTokenizer.
-* The Criss‑Cross blocks are kept, but temporal heads use a *causal* mask so
-  future timesteps are hidden while spatial heads remain full‑context.
-* The residual‑vector‑quantiser (RVQ) follows the EMA update & commitment‑loss
-  formulation (§2.2) but exposes a *forward* pass suitable for inference (no
-  EMA).
-"""
-
 from __future__ import annotations
 
-from typing import Tuple, List
+import math
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
+from einops import rearrange
 
-try:  # Optional import; not required for forward usage
-    from ..training.lightning import LitModel
-except Exception:  # pragma: no cover - allow importing without lightning deps
-    LitModel = None  # type: ignore
-from ..layers.st_blocks import (
-    CrissCrossBlock,
+from ..training.lightning import LitModel
+from ..layers.brainomni.attn import (
+    RMSNorm,
+    SpatialTemporalAttentionBlock,
 )
-from .tokenizers.brainomnitokenizer import BrainOmniTokenizer
+from ..utils.eval import sample as sample_logits
+
+from .tokenizers.brainomni import BrainOmniCausalTokenizer, CausalTokenSequence
 
 
-class BrainOmniForecast(nn.Module):
-    """Autoregressive predictor over RVQ stage‑wise tokens.
-
-    Parameters
-    ----------
-    codebook_size : int
-        Size *K* of each RVQ codebook.
-    num_quantizers : int
-        Number of residual VQ stages *Nq*.
-    latent_channels : int, default 16
-        Latent source variables (C′ in the paper).
-    emb_dim : int, default 512
-        Transformer width.
-    depth : int, default 12
-        Number of Criss‑Cross blocks.
-    num_heads : int, default 8
-        Total attention heads (split half/half spatial‑temporal inside the
-        block).
-    dropout : float, default 0.1
-    max_time_steps : int, default 1024
-        Controls rotary/positional encodings.
-    rotary_base : int, default 10000
-    """
+class BrainOmniCausalForecast(nn.Module):
+    """Autoregressive forecaster over BrainOmni latent tokens with causal attention."""
 
     def __init__(
         self,
-        attn_args: dict,
-        codebook_size: int = 1024,
-        num_quantizers: int = 4,
-        latent_channels: int = 16,
-        emb_dim: int = 512,
-        depth: int = 12,
-        dropout: float = 0.1,
-        max_time_steps: int = 1024,
-        rotary_base: int = 10000,
-        attn_type: str = "standard",
-    ) -> None:
-        super().__init__()
-        self.latent_channels = latent_channels
-        self.num_quantizers = num_quantizers
-        self.codebook_size = codebook_size
-
-        # ── input embeddings ────────────────────────────────────────────
-        self.stage_embeds = nn.ModuleList(
-            [nn.Embedding(codebook_size, emb_dim) for _ in range(num_quantizers)]
-        )
-        self.channel_emb = nn.Embedding(latent_channels, emb_dim)
-        self.depth_emb = nn.Embedding(num_quantizers, emb_dim)
-
-        # Pre‑compute rotary positional encodings (sin/cos interleaved)
-        rope = self._build_rotary_emb(emb_dim, max_time_steps, rotary_base)
-        # shape: (max_T, d_model) -> register for easy slicing and device move
-        self.register_buffer("rope", rope, persistent=False)
-
-        # Transformer backbone – Criss‑Cross keeps spatial/temporal heads
-        self.layers = nn.ModuleList(
-            [
-                CrissCrossBlock(
-                    attn_args=attn_args,
-                    dropout=dropout,
-                    attn_type=attn_type,
-                )
-                for _ in range(depth)
-            ]
-        )
-        self.norm = nn.RMSNorm(emb_dim)
-
-        # ── output heads – one per stage ────────────────────────────────
-        self.stage_heads = nn.ModuleList(
-            [
-                nn.Linear(emb_dim, codebook_size, bias=False)
-                for _ in range(num_quantizers)
-            ]
-        )
-
-    @staticmethod
-    def _build_rotary_emb(dim: int, max_len: int, base: int = 10000):
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        t = torch.arange(max_len, dtype=torch.float)
-        freqs = torch.einsum("t,d->td", t, inv_freq)  # outer product
-        return torch.cat([freqs.cos(), freqs.sin()], dim=-1)  # (T, dim)
-
-    def forward(self, codes: torch.Tensor, embeds: torch.Tensor = None) -> torch.Tensor:
-        """Predict logits for the *next* time‑step.
-
-        Parameters
-        ----------
-        codes : (B, C_latent, Nq, T) int64
-            Tokens **up‑to** the current time ``t``.  During training usual
-            teacher‑forcing (shift‑by‑one) should be applied externally so
-            that ``codes[..., -1]`` is the *input* and the model is trained
-            to predict the gold tokens at that position.
-
-        Returns
-        -------
-        logits : (B, C_latent, Nq, T, K) float32
-            Stage‑wise distribution over the codebook for each latent
-            channel & time‑step.
-        """
-        B, C_latent, Nq, T = codes.shape
-        assert C_latent == self.latent_channels, "latent channel mismatch"
-        assert Nq == self.num_quantizers, "quantizer depth mismatch"
-        device = codes.device
-
-        # ── embed & sum residual‑stage vectors ─────────────────────────
-        #   RVQ decodes by *summing* stage embeddings; we mirror that.
-        if embeds is None:
-            embeds = 0.0
-            for i in range(Nq):
-                emb_i = self.stage_embeds[i](codes[:, :, i, :])  # (B, C, T, D)
-                depth_bias = self.depth_emb.weight[i]  # (D,)
-                embeds = embeds + (emb_i + depth_bias)  # broadcast (B,C,T,D)
-
-        # add per‑channel embedding
-        ch = self.channel_emb(torch.arange(C_latent, device=device))  # (C, D)
-        emb = embeds + ch[None, :, None, :]
-
-        # add rotary positional encodings
-        rope_slice = self.rope[:T]  # (T,d)
-        emb = emb + rope_slice.view(1, 1, T, emb.shape[-1])
-
-        # flatten to sequence  (B, S, D) where S = C_latent * T
-        tok = emb.view(B, C_latent * T, -1)
-
-        # ── Transformer ────────────────────────────────────────────────
-        x = tok
-        for blk in self.layers:
-            x = blk(x, T)
-        x = self.norm(x)
-
-        # ── project to per‑stage logits ────────────────────────────────
-        logits_per_stage: List[torch.Tensor] = []
-        for head in self.stage_heads:
-            logit = head(x)  # (B, S, K)
-            logit = logit.view(B, C_latent, T, self.codebook_size)  # (B, C, T, K)
-            logits_per_stage.append(logit)
-        # stack along stage dimension – (B, C, Nq, T, K)
-        logits = torch.stack(logits_per_stage, dim=2)
-        return logits.contiguous()
-
-
-class BrainOmniSystem(nn.Module):
-    """Tokenizer + Forecast wrapper with the new factorised forecast model."""
-
-    def __init__(
-        self,
-        codebook_size: int,
-        num_quantizers: int,
-        latent_channels: int,
-        tokenizer: dict,
-        forecaster: dict,
+        overlap_ratio: float,
+        lm_dim: int,
+        lm_head: int,
+        lm_depth: int,
+        lm_dropout: float,
+        num_quantizers_used: int | None = None,
+        freeze_tokenizer: bool = False,
+        tokenizer_kwargs: dict = None,
         tokenizer_path: str = None,
-        train_tokenizer: bool = False,
-    ) -> None:
+    ):
         super().__init__()
+        if tokenizer_kwargs is None:
+            tokenizer_kwargs = {}
+        self.lm_dim = lm_dim
+        self.overlap_ratio = overlap_ratio
+        self.num_quantizers_used = tokenizer_kwargs.get("num_quantizers")
+        self.freeze_tokenizer = freeze_tokenizer
 
-        self.train_tokenizer = train_tokenizer
+        self.tokenizer = BrainOmniCausalTokenizer(**tokenizer_kwargs)
+        n_dim = tokenizer_kwargs.get("n_dim")
 
         if tokenizer_path is not None:
             lit = LitModel.load_from_checkpoint(tokenizer_path, strict=False)
@@ -208,73 +52,209 @@ class BrainOmniSystem(nn.Module):
                 self.tokenizer = self.tokenizer._orig_mod
 
         else:
-            self.tokenizer = BrainOmniTokenizer(
-                latent_channels=latent_channels,
-                codebook_size=codebook_size,
-                num_quantizers=num_quantizers,
-                **tokenizer,
-            )
+            self.tokenizer = BrainOmniCausalTokenizer(**tokenizer_kwargs)
 
         # freeze tokenizer during autoregressive training (optional)
-
-        if not train_tokenizer:
+        if self.freeze_tokenizer:
             for p in self.tokenizer.parameters():
                 p.requires_grad_(False)
 
-        self.forecaster = BrainOmniForecast(
-            codebook_size=codebook_size,
-            num_quantizers=num_quantizers,
-            latent_channels=latent_channels,
-            **forecaster,
+        self.projection = nn.Linear(n_dim, lm_dim) if n_dim != lm_dim else nn.Identity()
+        self.blocks = nn.ModuleList(
+            [
+                SpatialTemporalAttentionBlock(lm_dim, lm_head, lm_dropout, causal=True)
+                for _ in range(lm_depth)
+            ]
         )
-
-    def forward_train(
-        self, inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]:
-                logits: (B, C_latent, Nq, T, K)
-                codes: (B, C_latent, Nq, T') - these are the tokens to predict
-        """
-        # Tokenise, TODO: extra loss for reconstruction
-        # (B, C', W, Nq)
-        x_hat, residuals, nearest, embeds, codes = self.tokenizer(
-            inputs, return_reconstruction=True
+        self.predict_head = nn.Linear(
+            lm_dim, self.num_quantizers_used * tokenizer_kwargs.get("codebook_size")
         )
-        codes = codes.permute(0, 1, 3, 2).contiguous()  # (B, C', Nq, T')
+        # self.apply(self._init_weights)
 
-        # Forecast
-        logits = self.forecaster(codes[:, :, :, :-1], embeds[:, :, :-1, :])
-        return logits, codes[:, :, :, 1:]
+    # ----------------------------- helpers ----------------------------- #
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, RMSNorm):
+            if isinstance(m.weight, nn.Parameter):
+                nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Embedding):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+        elif isinstance(m, nn.Parameter):
+            nn.init.trunc_normal_(m, std=0.02)
 
+    def _channel_bias(self, embeddings: torch.Tensor) -> torch.Tensor:
+        neuro = (
+            self.tokenizer.encoder.neuros.type_as(embeddings)
+            .detach()
+            .view(1, -1, 1, embeddings.shape[-1])
+        )
+        return embeddings + neuro
+
+    def _logits_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Args:
+
+        embeddings: B C W D Returns:     logits: B C W Nq K
+        """
+        x = self.projection(self._channel_bias(embeddings))
+        for block in self.blocks:
+            x = block(x)
+
+        logits = rearrange(
+            self.predict_head(x),
+            "B C W (N D) -> B C W N D",
+            N=self.num_quantizers_used,
+        )
+        return logits
+
+    def forward_token_sequence(
+        self,
+        token_seq: CausalTokenSequence,
+        compute_targets: bool = True,
+    ) -> Dict[str, torch.Tensor]:
+        """Run the AR head on a provided causal token sequence."""
+        embeddings = token_seq.embeddings
+        if self.freeze_tokenizer:
+            embeddings = embeddings.detach()
+
+        if compute_targets:
+            context = embeddings[:, :, :-1]
+        else:
+            context = embeddings
+
+        logits = self._logits_from_embeddings(context)
+        output: Dict[str, torch.Tensor] = {"logits_full": logits}
+
+        if compute_targets:
+            target_idx = token_seq.indices[..., : self.num_quantizers_used]
+            output["logits"] = logits
+            output["targets"] = target_idx[:, :, 1:]
+
+        return output
+
+    # ----------------------------- forward ----------------------------- #
     def forward(
         self,
-        inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x: torch.Tensor | Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        pos: torch.Tensor | None = None,
+        sensor_type: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        """Args:
+
+        x: raw MEG (B, C, T) or tuple (x, pos, sensor_type)
         """
-        Args:
-            inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        if self.freeze_tokenizer:
+            self.tokenizer.eval()
 
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]:
-                logits: (B, C_latent, Nq, T, K)
-                codes: (B, C_latent, Nq, T') - these are the tokens to predict
-        """
-        if self.train_tokenizer:
-            return self.forward_train(inputs)
+        overlap = float(kwargs.get("overlap_ratio", self.overlap_ratio))
+        if isinstance(x, (tuple, list)):
+            x, pos, sensor_type = x  # type: ignore[misc]
+        if pos is None or sensor_type is None:
+            raise ValueError("pos and sensor_type must be provided for BrainOmni.")
 
-        self.tokenizer.eval()
+        if self.freeze_tokenizer:
+            with torch.no_grad():
+                token_seq, commitment = self.tokenizer.tokenize(
+                    x, pos, sensor_type, overlap_ratio=overlap
+                )
+        else:
+            token_seq, commitment = self.tokenizer.tokenize(
+                x, pos, sensor_type, overlap_ratio=overlap
+            )
 
-        # Tokenise
-        with torch.no_grad():
-            # (B, C', W, Nq)
-            codes = self.tokenizer(inputs, return_reconstruction=False)
-        codes = codes.permute(0, 1, 3, 2).contiguous()  # (B, C', Nq, T')
+        outputs = self.forward_token_sequence(token_seq, compute_targets=True)
+        outputs["token_seq"] = token_seq
 
-        # Forecast
-        logits = self.forecaster(codes[:, :, :, :-1])
-        return logits, codes[:, :, :, 1:]
+        if not self.freeze_tokenizer:
+            outputs["commitment_loss"] = commitment
+        return outputs
+
+    # ----------------------------- generation ----------------------------- #
+    @torch.inference_mode()
+    def forecast(
+        self,
+        x: torch.Tensor,
+        pos: torch.Tensor,
+        sensor_type: torch.Tensor,
+        steps: int,
+        *,
+        overlap_ratio: float | None = None,
+        sampling: str = "argmax",
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+    ) -> torch.Tensor:
+        """Autoregressively extend the sequence by *steps* latent tokens and decode back
+        to MEG space using the tokenizer decoder."""
+        self.eval()
+        overlap = float(
+            overlap_ratio if overlap_ratio is not None else self.overlap_ratio
+        )
+
+        token_seq, _ = self.tokenizer.tokenize(
+            x, pos, sensor_type, overlap_ratio=overlap
+        )
+        seq_indices = token_seq.indices[..., : self.num_quantizers_used]
+
+        for _ in range(int(steps)):
+            emb = self.tokenizer.indices_to_embeddings(
+                seq_indices, token_seq.tokens_per_window
+            )
+            emb_flat = rearrange(emb, "B C N T D -> B C (N T) D")
+            tmp_seq = CausalTokenSequence(
+                embeddings=emb_flat,
+                indices=seq_indices,
+                tokens_per_window=token_seq.tokens_per_window,
+                num_windows=math.ceil(emb_flat.shape[2] / token_seq.tokens_per_window),
+                overlap_ratio=overlap,
+            )
+            logits = self._logits_from_embeddings(tmp_seq.embeddings)
+            next_logits = logits[:, :, -1]
+
+            next_indices = []
+            for q in range(self.num_quantizers_used):
+                next_indices.append(
+                    sample_logits(
+                        next_logits[..., q, :],
+                        strategy=sampling,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                    )
+                )
+            next_indices = torch.stack(next_indices, dim=-1)
+            seq_indices = torch.cat([seq_indices, next_indices.unsqueeze(2)], dim=2)
+
+        decode_indices = self._restore_full_indices(seq_indices, token_seq)
+        windows = self.tokenizer.decode_windows(
+            decode_indices,
+            pos,
+            sensor_type,
+            tokens_per_window=token_seq.tokens_per_window,
+        )
+        stride = self.tokenizer._stride(overlap)
+        return self.tokenizer.overlap_add(windows, stride=stride)
+
+    def _restore_full_indices(
+        self, seq_indices: torch.Tensor, token_seq: CausalTokenSequence
+    ) -> torch.Tensor:
+        """Bring truncated quantizer predictions back to full RVQ depth for decoding."""
+        total_q = self.tokenizer.quantizer.rvq.num_quantizers
+        if seq_indices.shape[-1] == total_q:
+            return seq_indices
+
+        used_q = seq_indices.shape[-1]
+        base = token_seq.indices
+        if base.shape[2] < seq_indices.shape[2]:
+            pad_len = seq_indices.shape[2] - base.shape[2]
+            pad = base[..., -1:, :].expand(
+                base.shape[0], base.shape[1], pad_len, base.shape[-1]
+            )
+            base = torch.cat([base, pad], dim=2)
+
+        base = base[..., : seq_indices.shape[2], :].clone()
+        base[..., :used_q] = seq_indices
+        return base

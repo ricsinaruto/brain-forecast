@@ -29,7 +29,7 @@ def main(cli_args=None):
         type=str,
         help="stage of preprocessing",
         required=True,
-        choices=["stage_1", "stage_2", "both"],
+        choices=["stage_1", "stage_2", "stage_3", "both", "all"],
     )
     script_args = parser.parse_args(cli_args)
     args_file = script_args.args
@@ -57,9 +57,15 @@ def main(cli_args=None):
         experiment.preprocess_stage_1()
     elif script_args.stage == "stage_2":
         experiment.preprocess_stage_2()
+    elif script_args.stage == "stage_3":
+        experiment.preprocess_stage_3()
     elif script_args.stage == "both":
         experiment.preprocess_stage_1()
         experiment.preprocess_stage_2()
+    elif script_args.stage == "all":
+        experiment.preprocess_stage_1()
+        experiment.preprocess_stage_2()
+        experiment.preprocess_stage_3()
     else:
         raise ValueError(f"Invalid stage: {script_args.stage}")
 

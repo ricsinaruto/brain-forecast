@@ -4,8 +4,6 @@ from typing import List, Optional
 
 import torch.nn.functional as F
 
-from ..layers.heads import WavenetLogitsHead, Wavenet3DLogitsHead
-
 
 def wave_init_weights(m):
     """Initialize conv1d with Xavier_uniform weight and 0 bias."""
@@ -13,6 +11,56 @@ def wave_init_weights(m):
         torch.nn.init.xavier_uniform_(m.weight)
         if m.bias is not None:
             torch.nn.init.normal_(m.bias, mean=1e-3, std=1e-2)
+
+
+class WavenetLogitsHead(nn.Module):
+    def __init__(
+        self,
+        skip_channels: int,
+        residual_channels: int,
+        head_channels: int,
+        out_channels: int,
+        bias: bool = True,
+        dropout: float = 0.0,
+    ):
+        """Collates skip results and transforms them to logit predictions.
+
+        Args:     skip_channels: number of skip channels     residual_channels: number
+        of residual channels     head_channels: number of hidden channels to compute
+        result     out_channels: number of output channels     bias: When true,
+        convolutions use a bias term.
+        """
+        del residual_channels
+        super().__init__()
+        self.transform = torch.nn.Sequential(
+            torch.nn.Dropout1d(p=dropout),
+            torch.nn.LeakyReLU(),  # note, we perform non-lin first (on sum of skips)
+            torch.nn.Conv1d(
+                skip_channels,
+                head_channels,
+                kernel_size=1,
+                bias=bias,
+            ),  # enlarge and squeeze (not based on paper)
+            torch.nn.Dropout1d(p=dropout),
+            torch.nn.LeakyReLU(),
+            torch.nn.Conv1d(
+                head_channels,
+                out_channels,
+                kernel_size=1,
+                bias=bias,
+            ),  # logits
+        )
+
+    def forward(self, encoded, skips):
+        """Compute logits from WaveNet layer results.
+
+        Args:     encoded: unused last residual output of last layer     skips: list of
+        skip connections of shape (B,C,T) where C is         the number of skip
+        channels. Returns:     logits: (B,Q,T) tensor of logits, where Q is the number
+        of output     channels.
+        """
+        del encoded
+        return self.transform(sum(skips))
 
 
 class WavenetLayer(nn.Module):
@@ -86,26 +134,24 @@ class WavenetLayer(nn.Module):
 
     def forward(self, x, c, causal_pad=True):
         """Compute residual and skip output from inputs x.
-        Args:
-            x: (B,C,T) tensor where C is the number of residual channels
-                when `in_channels` was specified the number of input channels
-            c: optional tensor containing a global (B,C,1) or local (B,C,T)
-                condition, where C is the number of condition channels.
-            causal_pad: layer performs causal padding when set to True, otherwise
-                assumes the input is already properly padded.
-        Returns
-            r: (B,C,T) tensor where C is the number of residual channels
-            skip: (B,C,T) tensor where C is the number of skip channels
+
+        Args:     x: (B,C,T) tensor where C is the number of residual channels
+        when `in_channels` was specified the number of input channels     c: optional
+        tensor containing a global (B,C,1) or local (B,C,T)         condition, where C
+        is the number of condition channels.     causal_pad: layer performs causal
+        padding when set to True, otherwise         assumes the input is already
+        properly padded. Returns     r: (B,C,T) tensor where C is the number of residual
+        channels     skip: (B,C,T) tensor where C is the number of skip channels
         """
         p = (self.causal_left_pad, 0) if causal_pad else (0, 0)
         x_dilated = self.conv_dilation(F.pad(x, p))
 
         if self.cond_channels:
             assert c is not None, "conditioning required"
-            x_cond = self.conv_cond(c[:, :, -x_dilated.shape[-1] :])
+            x_cond = self.conv_cond(c[:, :, -x_dilated.shape[-1]:])
             x_dilated = x_dilated + x_cond
         x_filter = torch.tanh(x_dilated[:, : self.dilation_channels])
-        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels :])
+        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels:])
         x_h = x_gate * x_filter
         skip = self.conv_skip(x_h)
         res = self.conv_res(x_h)
@@ -116,13 +162,13 @@ class WavenetLayer(nn.Module):
         if causal_pad:
             out = x + res
         else:
-            out = x[..., -res.shape[-1] :] + res
+            out = x[..., -res.shape[-1]:] + res
 
         # dropout
         out = self.dropout(out)
 
         # need to keep only second half of skips
-        return out, skip[:, :, -self.shift :]
+        return out, skip[:, :, -self.shift:]
 
 
 class EmbeddingLayer(nn.Module):
@@ -260,16 +306,13 @@ class WavenetFullChannel(nn.Module):
         test_mode: bool = False,
     ) -> torch.Tensor:
         """Computes logits and encoding results from observations.
-        Args:
-            x: (B,T) or (B,Q,T) tensor containing observations
-            c: optional conditioning Tensor. (B,C,1) for global conditions,
-                (B,C,T) for local conditions. None if unused
-            causal_pad: Whether or not to perform causal padding.
-            test_mode: Whether to return the encoded embeddings.
-        Returns:
-            logits: (B,Q,T) tensor of logits. Note that the t-th temporal output
-                represents the distribution over t+1.
-            encoded: same as `.encode`.
+
+        Args:     x: (B,T) or (B,Q,T) tensor containing observations     c: optional
+        conditioning Tensor. (B,C,1) for global conditions,         (B,C,T) for local
+        conditions. None if unused     causal_pad: Whether or not to perform causal
+        padding.     test_mode: Whether to return the encoded embeddings. Returns:
+        logits: (B,Q,T) tensor of logits. Note that the t-th temporal output
+        represents the distribution over t+1.     encoded: same as `.encode`.
         """
         B, C, T = x.shape
 
@@ -302,6 +345,29 @@ class WavenetFullChannel(nn.Module):
             return out, x  # (B, C, T, Q)
 
         return out  # (B, C, T, Q)
+
+
+class Wavenet3DLogitsHead(nn.Module):
+    def __init__(
+        self,
+        skip_channels: int,
+        head_channels: int,
+        out_channels: int,
+        dropout: float = 0.0,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.transform = torch.nn.Sequential(
+            torch.nn.Dropout3d(p=dropout),
+            torch.nn.LeakyReLU(),
+            torch.nn.Conv3d(skip_channels, head_channels, kernel_size=1, bias=bias),
+            torch.nn.Dropout3d(p=dropout),
+            torch.nn.LeakyReLU(),
+            torch.nn.Conv3d(head_channels, out_channels, kernel_size=1, bias=bias),
+        )
+
+    def forward(self, skips: List[torch.Tensor]) -> torch.Tensor:
+        return self.transform(sum(skips))
 
 
 class Wavenet3DLayer(nn.Module):
@@ -380,12 +446,10 @@ class Wavenet3DLayer(nn.Module):
         causal_pad: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Args:
-        x: (B, C, H, W, T)
-        c: optional conditioning, (B, Cc, H, W, T) or broadcastable
-        causal_pad: whether to apply causal left padding in time
-        Returns:
-            residual_out: (B, C_res, H, W, T)
-            skip: (B, C_skip, H, W, T)
+
+        x: (B, C, H, W, T) c: optional conditioning, (B, Cc, H, W, T) or broadcastable
+        causal_pad: whether to apply causal left padding in time Returns:
+        residual_out: (B, C_res, H, W, T)     skip: (B, C_skip, H, W, T)
         """
         if causal_pad:
             # pad order for 5D input: (W_left, W_right, H_left,
@@ -404,7 +468,7 @@ class Wavenet3DLayer(nn.Module):
             x_dilated = x_dilated + c_proj
 
         x_filter = torch.tanh(x_dilated[:, : self.dilation_channels])
-        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels :])
+        x_gate = torch.sigmoid(x_dilated[:, self.dilation_channels:])
         x_h = x_gate * x_filter
 
         skip = self.conv_skip(x_h)
@@ -416,7 +480,7 @@ class Wavenet3DLayer(nn.Module):
         if causal_pad:
             out = x + res
         else:
-            out = x[..., -res.shape[-1] :] + res
+            out = x[..., -res.shape[-1]:] + res
 
         out = self.dropout(out)
         return out, skip
@@ -426,12 +490,12 @@ class Wavenet3D(nn.Module):
     """WaveNet-style model operating on 3D volumes over time.
 
     Expects inputs shaped as (B, C, H, W, T), where C is the channel/embedding
-    dimension. The network performs causal convolutions along the temporal
-    axis using 3D convolutions with kernel size (1, 1, k), so spatial
-    dimensions are preserved while receptive field grows only in time.
+    dimension. The network performs causal convolutions along the temporal axis using 3D
+    convolutions with kernel size (1, 1, k), so spatial dimensions are preserved while
+    receptive field grows only in time.
 
-    The model mirrors the gating, residual, and skip-connection structure of a
-    classical WaveNet, but generalized to 3D.
+    The model mirrors the gating, residual, and skip-connection structure of a classical
+    WaveNet, but generalized to 3D.
     """
 
     def __init__(
@@ -521,11 +585,10 @@ class Wavenet3D(nn.Module):
         test_mode: bool = False,
     ) -> torch.Tensor:
         """Args:
-        x: (B, H, W, T)
-        condition: optional conditioning tensor broadcastable to (B, Cc, H, W, T)
-        causal_pad: whether to apply causal left padding on temporal axis
-        Returns:
-            logits: (B, out_channels, H, W, T)
+
+        x: (B, H, W, T) condition: optional conditioning tensor broadcastable to (B, Cc,
+        H, W, T) causal_pad: whether to apply causal left padding on temporal axis
+        Returns:     logits: (B, out_channels, H, W, T)
         """
 
         x = self.embedding(x)  # (B, H, W, T, E)

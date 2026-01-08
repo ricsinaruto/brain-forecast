@@ -1,0 +1,13 @@
+config:
+  c_in: 68
+  c_down: 2
+  t_down: 2
+  f_hidden: 32
+  d_latent: 128
+  k_stem: 7
+  k_down: 5
+  k_up: 4
+  k_refine: 7
+  dropout: 0.0
+  tie_channel_mats: false
+  recon_loss: mse

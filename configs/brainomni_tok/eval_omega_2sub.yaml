@@ -1,0 +1,44 @@
+dataloader:
+  batch_size: 32
+  num_workers: 16
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 4
+datasplitter:
+  dataset_class: ChunkDatasetReconstruction
+  dataset_root: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_cont
+  example_seconds: 2.56
+  overlap_seconds: 0.0
+  test_ratio: 0.1
+  val_ratio: 0.1
+eval_runner:
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni_tok/logs/version_7/checkpoints/best-checkpoint.ckpt
+  enabled: true
+  epoch: 2
+  max_batches: 16
+  modal_app: ephys-gpt
+  modal_function: runevals
+  num_examples: 5
+  step: 56
+  use_modal: true
+  version: 7
+lightning:
+  lr: 0.0005
+  lr_scheduler:
+    T_max: 100
+    class_name: CosineAnnealingLR
+    eta_min: 0.0001
+  weight_decay: 0.0
+loss_name: BrainOmniCausalTokenizerLoss
+model_config: configs/brainomni/tokenizer.yaml
+model_name: BrainOmniCausalTokenizer
+resume_from: null
+save_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni_tok
+trainer:
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  checkpoint_cadence_epochs: 1
+  default_root_dir: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni_tok
+  gradient_clip_val: 1.0
+  max_epochs: 100
+  precision: bf16-mixed

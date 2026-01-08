@@ -1,9 +1,32 @@
 import torch
-from torch import Tensor
-from torch import nn
-from typing import Any
 import torch.nn.functional as F
-import math
+from torch import Tensor, nn
+from typing import Any, List, Optional, Tuple
+
+
+class VQVAEHF(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.metrics: dict[str, Any] = {
+            "recon": self._recon_loss,
+            "vq": self._vq_loss,
+            "ppl": self._perplexity,
+        }
+
+    def forward(self, outputs, target: Tensor, **kwargs) -> Tensor:
+        return outputs.loss
+
+    @staticmethod
+    def _recon_loss(outputs: Tensor, target: Tensor, **kwargs) -> Tensor:
+        return outputs.recon_loss
+
+    @staticmethod
+    def _vq_loss(outputs: Tensor, target: Tensor, **kwargs) -> Tensor:
+        return outputs.vq_loss
+
+    @staticmethod
+    def _perplexity(outputs: Tensor, target: Tensor, **kwargs) -> Tensor:
+        return outputs.perplexity
 
 
 class MSE(nn.Module):
@@ -19,9 +42,10 @@ class MSE(nn.Module):
         **kwargs,
     ) -> Tensor:
         """Mean-squared-error loss with a flexible signature.
+
         Accepts arbitrary additional keyword arguments (ignored) so that it can be
-        called in the same way as :class:`CrossEntropy` within the training
-        loop, which always forwards the current *model* instance.
+        called in the same way as :class:`CrossEntropy` within the training loop, which
+        always forwards the current *model* instance.
         """
         return F.mse_loss(logits, targets).mean()
 
@@ -29,7 +53,15 @@ class MSE(nn.Module):
 class NLL(nn.Module):
     def __init__(self):
         super().__init__()
-        self.metrics: dict[str, Any] = {}
+        self.metrics: dict[str, Any] = {"nll": self._nll, "logdet": self._logdet}
+
+    @staticmethod
+    def _nll(losses: Tensor, target: Tensor, **kwargs) -> Tensor:
+        return losses[0]
+
+    @staticmethod
+    def _logdet(losses: Tensor, target: Tensor, **kwargs) -> Tensor:
+        return losses[1]
 
     def forward(self, losses: Tensor, target: Tensor, **kwargs) -> Tensor:
         nll, logdet = losses
@@ -39,9 +71,9 @@ class NLL(nn.Module):
 class ChronoFlowLoss(nn.Module):
     """Wrapper around ChronoFlowSSM outputs for Lightning training.
 
-    Expects the model forward pass to return a dictionary with at least the
-    key ``"nll"`` and optionally a ``"stats"`` sub-dictionary containing
-    ``"bits_per_dim"`` and ``"avg_boundary"`` tensors.
+    Expects the model forward pass to return a dictionary with at least the key
+    ``"nll"`` and optionally a ``"stats"`` sub-dictionary containing ``"bits_per_dim"``
+    and ``"avg_boundary"`` tensors.
     """
 
     def __init__(self) -> None:
@@ -69,8 +101,10 @@ class ChronoFlowLoss(nn.Module):
         val = stats.get("bits_per_dim")
         if val is None:
             return torch.tensor(float("nan"), device=outputs["nll"].device)
-        return val.detach() if isinstance(val, torch.Tensor) else torch.as_tensor(
-            val, device=outputs["nll"].device
+        return (
+            val.detach()
+            if isinstance(val, torch.Tensor)
+            else torch.as_tensor(val, device=outputs["nll"].device)
         )
 
     @staticmethod
@@ -79,22 +113,57 @@ class ChronoFlowLoss(nn.Module):
         val = stats.get("avg_boundary")
         if val is None:
             return torch.tensor(float("nan"), device=outputs["nll"].device)
-        return val.detach() if isinstance(val, torch.Tensor) else torch.as_tensor(
-            val, device=outputs["nll"].device
+        return (
+            val.detach()
+            if isinstance(val, torch.Tensor)
+            else torch.as_tensor(val, device=outputs["nll"].device)
         )
 
 
 class VQVAELoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.metrics: dict[str, Any] = {}
+        self.metrics: dict[str, Any] = {
+            "codebook_perplexity": lambda outputs, *_: self._stat(
+                outputs, "codebook_perplexity"
+            ),
+            "unused_codes": lambda outputs, *_: self._stat(outputs, "unused_codes"),
+            "active_codes": lambda outputs, *_: self._stat(outputs, "active_codes"),
+            "revived_codes": lambda outputs, *_: self._stat(outputs, "revived_codes"),
+        }
 
     def forward(self, outputs: Tensor, target: Tensor, **kwargs) -> Tensor:
         x_recon, vq_output = outputs
 
+        if isinstance(vq_output, dict) and "total_loss" in vq_output:
+            loss_val = vq_output["total_loss"]
+            if not torch.is_tensor(loss_val):
+                loss_val = torch.as_tensor(loss_val, device=x_recon.device)
+            return loss_val
+
         recon_loss = F.mse_loss(x_recon, target)
         loss = recon_loss + vq_output["commitment_loss"]
-        return loss
+        return loss * 2
+
+    @staticmethod
+    def _stat(outputs: Tensor | tuple, key: str) -> Tensor:
+        # metrics are derived from the auxiliary dict returned by the model
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 1:
+            rec = outputs[0]
+            vq_output = outputs[1]
+            device = rec.device if torch.is_tensor(rec) else torch.device("cpu")
+            if isinstance(vq_output, dict):
+                val = vq_output.get(key)
+                if val is None:
+                    return torch.tensor(float("nan"), device=device)
+                return (
+                    val.detach()
+                    if torch.is_tensor(val)
+                    else torch.as_tensor(val, device=device)
+                )
+        # fallback if shape unexpected
+        device = outputs.device if torch.is_tensor(outputs) else torch.device("cpu")
+        return torch.tensor(float("nan"), device=device)
 
 
 class VQNSPLoss(nn.Module):
@@ -127,102 +196,78 @@ class VQNSPLoss(nn.Module):
         return loss
 
 
-class BrainTokenizerLoss(nn.Module):
-    """
-    Implements the compound loss used for BrainTokenizer training
-    (Eq. 1–5 in Section 2.2, ‘Training the BrainTokenizer’).
+class SpectralLoss(nn.Module):
+    """Time-domain MSE + log-PSD band loss.
 
-    Args
-    ----
-    amp_phase_norm : bool
-        Whether to z-score-normalise amplitude and phase spectra
-        before the L1 comparison (often stabilises early training).
-    eps : float
-        Numerical epsilon to avoid divide-by-zero in PCC.
+    Uses STFT with Hann window; compares mean log power per band.
     """
 
-    def __init__(self, amp_phase_norm: bool = True, eps: float = 1e-8) -> None:
+    def __init__(
+        self,
+        sample_rate: float,
+        n_fft: int = 256,
+        hop_length: Optional[int] = None,
+        eps: float = 1e-8,
+        band_edges: Optional[List[Tuple[float, float]]] = None,
+        band_weight: float = 1.0,
+    ):
         super().__init__()
-        self.amp_phase_norm = amp_phase_norm
+        self.sample_rate = float(sample_rate)
+        self.n_fft = int(n_fft)
+        self.hop_length = hop_length or (self.n_fft // 4)
         self.eps = eps
-        self.beta = 0.25
-        self.metrics = {}
+        self.band_edges = band_edges or [
+            (1, 4),
+            (4, 8),
+            (8, 13),
+            (13, 30),
+            (30, 50),
+        ]  # delta..gamma up to 50hz
+        self.band_weight = band_weight
 
-    def _fft_features(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """
-        rFFT along the last dimension → amplitude & wrapped phase
-        """
-        dim_to_reduce = tuple(range(1, x.ndim))  # all except batch dim 0
+        self.metrics: dict[str, Any] = {}
 
-        spec = torch.fft.rfft(x, dim=-1)
-        amp = spec.abs()
-        phase = torch.angle(spec)  # returns values in (-π, π]
-        if self.amp_phase_norm:
-            amp = (amp - amp.mean(dim=dim_to_reduce, keepdim=True)) / (
-                amp.std(dim=dim_to_reduce, keepdim=True) + self.eps
-            )
-            phase = (phase - phase.mean(dim=dim_to_reduce, keepdim=True)) / (
-                phase.std(dim=dim_to_reduce, keepdim=True) + self.eps
-            )
-        return amp, phase
+    def _power_spectrogram(self, x: torch.Tensor):
+        """X: (B, T, C) returns: psd (B*C, F), freqs (F,)"""
+        B, C, T = x.shape
+        xc = x.reshape(B * C, T)  # (B*C, T)
+        window = torch.hann_window(self.n_fft, device=x.device, dtype=x.dtype)
+        X = torch.stft(
+            xc,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=window,
+            center=True,
+            return_complex=True,
+        )  # (B*C, F, frames)
+        power = (X.real**2 + X.imag**2).mean(dim=-1)  # average over frames -> (B*C, F)
+        freqs = torch.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate).to(x.device)
+        return power, freqs
 
-    def _pcc(self, x: Tensor, y: Tensor) -> Tensor:
-        """
-        Pearson correlation coefficient along the last dimension,
-        averaged over batch & channel dims.
-        """
-        x_mu = x.mean(dim=-1, keepdim=True)
-        y_mu = y.mean(dim=-1, keepdim=True)
-        x_cent = x - x_mu
-        y_cent = y - y_mu
-        cov = (x_cent * y_cent).mean(dim=-1)
-        x_std = x_cent.std(dim=-1, unbiased=False) + self.eps
-        y_std = y_cent.std(dim=-1, unbiased=False) + self.eps
-        pcc = cov / (x_std * y_std)
-        return pcc.mean()  # scalar
-
-    def _phase_l1(self, a: Tensor, b: Tensor) -> Tensor:
-        diff = torch.remainder(a - b + math.pi, 2 * math.pi) - math.pi
-        return diff.abs().mean()
+    @staticmethod
+    def _bandpower(psd: torch.Tensor, freqs: torch.Tensor, f_lo: float, f_hi: float):
+        idx = (freqs >= f_lo) & (freqs < f_hi)
+        if idx.sum().item() == 0:
+            return psd.mean(dim=-1)  # fallback
+        return psd[:, idx].mean(dim=-1)
 
     def forward(
-        self,
-        inputs: tuple[
-            torch.Tensor,
-            list[torch.Tensor],
-            list[torch.Tensor],
-            torch.Tensor,
-            torch.Tensor,
-        ],
-        x_orig: torch.Tensor,
-        model: nn.Module | None = None,
+        self, pred: torch.Tensor, target: torch.Tensor, model: nn.Module | None = None
     ) -> torch.Tensor:
-        x_rec, rvq_residuals, rvq_nearest, _, _ = inputs
+        # Time-domain MSE
+        td = F.mse_loss(pred, target)
 
-        # 1) Time-domain L1
-        l_time = F.l1_loss(x_rec, x_orig)
+        # Spectral band loss on log-PSD
+        psd_p, freqs = self._power_spectrogram(pred)
+        psd_t, _ = self._power_spectrogram(target)
+        lp = torch.log(psd_p + self.eps)
+        lt = torch.log(psd_t + self.eps)
 
-        # 2) Frequency-domain L1 on amplitude & phase spectra
-        # amp_o, phase_o = self._fft_features(x_orig)
-        # amp_r, phase_r = self._fft_features(x_rec)
-        # l_freq = F.l1_loss(amp_r, amp_o) + self._phase_l1(phase_r, phase_o)
+        band_losses = []
+        for flo, fhi in self.band_edges:
+            bp = self._bandpower(lp, freqs, flo, fhi)
+            bt = self._bandpower(lt, freqs, flo, fhi)
+            band_losses.append(F.mse_loss(bp, bt))
+        spec = sum(band_losses) / max(1, len(band_losses))
 
-        # 3) PCC consistency term
-        pcc = self._pcc(x_orig, x_rec)
-        l_pcc = torch.exp(-pcc)  # Eq. 3
-
-        # 4) RVQ commitment loss (sum over codebook layers)
-        if not (len(rvq_residuals) == len(rvq_nearest)):
-            raise ValueError("rvq_residuals and rvq_nearest must be same length")
-
-        l_rvq = 0
-        for res, nq in zip(rvq_residuals, rvq_nearest):
-            l_rvq += (
-                self.beta * (res - nq.detach()).pow(2).mean()
-                + (res.detach() - nq).pow(2).mean()
-            )
-
-        # Total
-        # l_total = l_time + l_freq + l_pcc + l_rvq
-        l_total = l_time + l_pcc + l_rvq
-        return l_total
+        return td + self.band_weight * spec

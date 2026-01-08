@@ -1,0 +1,21 @@
+base_model_name: BENDRForecast
+num_classes: 39
+
+model_args:
+  channels: 306
+  samples: 125
+  encoder_h: 512
+  enc_width: [2, 2, 2, 2, 2, 2]
+  enc_downsample: [2, 1, 1, 2, 1, 1]
+  transformer_layers: 12
+  dropout: 0.2
+
+  attn_type: standard
+  mlp_type: standard
+
+  attn_args:
+    nheads: 16
+    dropout: 0.2
+    rope: true
+
+  mlp_args: {}

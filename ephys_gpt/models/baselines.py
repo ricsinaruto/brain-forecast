@@ -14,16 +14,14 @@ class CNNMultivariate(nn.Module):
         linear: bool = False,
         groups: int = 1,
     ):
-        """
-        Args:
-            in_channels: Number of input channels
-            num_layers: Number of layers
-            hidden_channels: Number of hidden channels
-            univariate: Whether to handle channels as the batch dimension
-            kernel_size: Kernel size
-            linear: Whether to use a linear layer instead of a convolutional layer
-            groups: Number of groups for the convolutional layer.
-            Set this to the number of input channels to have a per-channel model.
+        """Args:
+
+        in_channels: Number of input channels num_layers: Number of layers
+        hidden_channels: Number of hidden channels univariate: Whether to handle
+        channels as the batch dimension kernel_size: Kernel size linear: Whether to use
+        a linear layer instead of a convolutional layer groups: Number of groups for the
+        convolutional layer. Set this to the number of input channels to have a per-
+        channel model.
         """
         super().__init__()
 
@@ -65,12 +63,11 @@ class CNNUnivariate(nn.Module):
         kernel_size: int = 5,
         linear: bool = False,
     ):
-        """
-        Args:
-            num_layers: Number of layers
-            hidden_channels: Number of hidden channels
-            kernel_size: Kernel size
-            linear: Whether to use a linear layer instead of a convolutional layer
+        """Args:
+
+        num_layers: Number of layers hidden_channels: Number of hidden channels
+        kernel_size: Kernel size linear: Whether to use a linear layer instead of a
+        convolutional layer
         """
         super().__init__()
 
@@ -87,9 +84,7 @@ class CNNUnivariate(nn.Module):
 
 
 class CNNMultivariateQuantized(nn.Module):
-    """
-    Simple multivariate CNN model applied to quantized data.
-    """
+    """Simple multivariate CNN model applied to quantized data."""
 
     def __init__(
         self,
@@ -102,17 +97,14 @@ class CNNMultivariateQuantized(nn.Module):
         linear: bool = False,
         groups: int = 1,
     ):
-        """
-        Args:
-            in_channels: Number of input channels
-            num_classes: Number of classes
-            num_embeddings: Number of embeddings
-            num_layers: Number of layers
-            hidden_channels: Number of hidden channels
-            kernel_size: Kernel size
-            linear: Whether to use a linear layer instead of a convolutional layer
-            groups: Number of groups for the convolutional layer.
-            Set this to the number of input channels to have a per-channel model.
+        """Args:
+
+        in_channels: Number of input channels num_classes: Number of classes
+        num_embeddings: Number of embeddings num_layers: Number of layers
+        hidden_channels: Number of hidden channels kernel_size: Kernel size linear:
+        Whether to use a linear layer instead of a convolutional layer groups: Number of
+        groups for the convolutional layer. Set this to the number of input channels to
+        have a per-channel model.
         """
         super().__init__()
 
@@ -152,14 +144,11 @@ class CNNUnivariateQuantized(CNNMultivariateQuantized):
         kernel_size: int = 5,
         linear: bool = False,
     ):
-        """
-        Args:
-            num_classes: Number of classes
-            num_embeddings: Number of embeddings
-            num_layers: Number of layers
-            hidden_channels: Number of hidden channels
-            kernel_size: Kernel size
-            linear: Whether to use a linear layer instead of a convolutional layer
+        """Args:
+
+        num_classes: Number of classes num_embeddings: Number of embeddings num_layers:
+        Number of layers hidden_channels: Number of hidden channels kernel_size: Kernel
+        size linear: Whether to use a linear layer instead of a convolutional layer
         """
         super().__init__(
             1,

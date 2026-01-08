@@ -1,0 +1,24 @@
+trf_class: Qwen2_5_Video
+hidden_size: 768
+vocab_size: 256
+input_shape: [100, 68, 1]  # T, H, W
+
+trf_args:
+  intermediate_size: 3072
+  num_hidden_layers: 16
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  attention_dropout: 0.0
+  
+  use_sliding_window: False  # this may be very useful to reduce memory usage
+  sliding_window: 4096  # this is the window size for the sliding window attention
+  max_window_layers: 80  # first n layers will use full attention, the rest SWA
+  layer_types: null  # Attention pattern for each layer (list)
+  
+  max_position_embeddings: 8192  # should be higher than T' x H' x W'
+  rope_theta: 1000000.0
+  rope_scaling:  # can experiment with different types
+    rope_type: default
+    mrope_section: 8  # should be hidden_size / attention_heads // 6
+
+  use_cache: False

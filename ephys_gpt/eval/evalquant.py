@@ -13,7 +13,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset  # noqa: F401
+from ..dataset.dataloaders import TextDataLoader  # noqa: F401
+from scipy import signal
 from tqdm import tqdm
 
 from ..dataset import split_datasets
@@ -29,9 +31,9 @@ class EvalQuant:
     """Run and store the three evaluation tasks required by the specification."""
 
     def __init__(self, cfg: Dict) -> None:
-        """
-        Args:
-            cfg: Configuration dictionary
+        """Args:
+
+        cfg: Configuration dictionary
         """
         self.cfg = cfg
         self.eval_args = {**cfg.get("eval", {})}
@@ -42,17 +44,22 @@ class EvalQuant:
         # --------------------------- data ---------------------------
         split = split_datasets(**cfg["datasplitter"])
         dl_kwargs = {"shuffle": False, **cfg["dataloader"]}
+        self.dataloader_args = dl_kwargs
         self.test_dataset = split.test
         self.train_dataset = split.train
-        self.test_loader = DataLoader(split.test, **dl_kwargs)
-        first_inputs, _ = split.test[0]
 
+        dataloader_class = cfg.get("dataloader_class", "DataLoader")
+        self.test_loader = globals()[dataloader_class](split.test, **dl_kwargs)
+        self.train_loader = globals()[dataloader_class](split.train, **dl_kwargs)
+
+        first_inputs, _ = split.test[0]
         if isinstance(first_inputs, (list, tuple)):
             first_inputs = first_inputs[0]
 
         input_overlap = cfg["datasplitter"]["overlap_seconds"]
         self.input_overlap = int(input_overlap * split.test.sfreq)
 
+        self.dtype = self.eval_args.get("dtype", "float16")
         self.channel_shape = self.eval_args["channel_shape"]
         self.num_channels = self.eval_args["num_channels"]
         self.save_test_data = self.eval_args.get("save_test_data", False)
@@ -62,10 +69,14 @@ class EvalQuant:
         else:
             self.dataset = self.train_dataset
 
-        self._fallback_max_hist = int(first_inputs.shape[-1])
+        try:
+            self._fallback_max_hist = int(first_inputs.shape[-1])
+        except AttributeError:
+            self._fallback_max_hist = 0
         self.pos_2d = np.array(split.test.pos_2d)
         self.sfreq = split.test.sfreq
         self.device = self.eval_args["accelerator"]
+        self.batch_size = cfg["dataloader"]["batch_size"]
 
         # --------------------------- model --------------------------
         self.model = self._load_model()
@@ -75,13 +86,20 @@ class EvalQuant:
             self.model = self.model._orig_mod  # for compiled models
 
         self.max_hist = self._get_max_hist()
-        self.mu = getattr(self.model, "quant_levels", 256) - 1
+        self.mu = getattr(self.model, "quant_levels", None)
+
+        if self.mu is None:
+            self.mu = self.eval_args.get("quant_levels", 256) - 1
 
         # --------------------------- output dir ---------------------
         self.out_dir = Path(cfg["save_dir"]) / "evals"
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        self._cached_test_deq: np.ndarray | None = None  # (C,T_total)
+        self._cached_test_deq: np.ndarray | None = None
+        self._cached_quant_test_deq: np.ndarray | None = None
+
+        # build mask for image-models
+        self.postprocessor = getattr(self.train_dataset, "postprocessor", None)
 
     def run_all(self) -> None:
         # print("[EVAL] 1/3  history length sweep …")
@@ -126,9 +144,9 @@ class EvalQuant:
     # ---------------------------------------------------------------------
     @torch.inference_mode()
     def step_recursive_future(self) -> None:
-        N = int(self.eval_args["future_steps"])
+        N = int(self.eval_args.get("future_steps", 1))
 
-        strategy = self.eval_args["gen_sampling"]
+        strategy = self.eval_args.get("gen_sampling", "top_p")
         self.eval_args["gen_sampling"] = "argmax"
 
         # We use a shorter context (max_hist - N) so that, after generating N
@@ -157,7 +175,7 @@ class EvalQuant:
             # ------------------------------------------------------------------
             for t in tqdm(range(ctx_len, T - N + 1), desc="recursive-future-trial"):
                 # Context slice: tokens [t-ctx_len, t)
-                ctx = inputs[..., t - ctx_len : t]  # (B, ..., ctx_len)
+                ctx = inputs[..., t - ctx_len: t]  # (B, ..., ctx_len)
 
                 # Recursive forecast N future steps using the model's KV-cache
                 fut_pred = self._recursive_forecast(ctx, N)  # (B, ..., N)
@@ -212,9 +230,7 @@ class EvalQuant:
     # ---------------------------------------------------------------------
     @torch.inference_mode()
     def step_history_sweep(self) -> None:
-        """
-        Compute accuracy and MSE for all history lengths at every timepoint.
-        """
+        """Compute accuracy and MSE for all history lengths at every timepoint."""
         H = self.max_hist
         hist_lengths = torch.arange(1, H + 1, device=self.device)  # (H,)
 
@@ -237,10 +253,10 @@ class EvalQuant:
             # For memory reasons process in chunks along time dimension
             for t in tqdm(range(H, T), desc="history-sweep-trial"):
                 # prepare slice (B,...,H)
-                ctx_full = inputs[..., t - H : t]
+                ctx_full = inputs[..., t - H: t]
                 logits = self._fwd(ctx_full)  # (B,...,H,Q)
                 preds = logits.argmax(dim=-1)  # (B,...,H)
-                gt = targets[..., t - H : t]
+                gt = targets[..., t - H: t]
 
                 # accuracy + mse for all histories at this t
                 acc_hist += (preds == gt).float().sum(dim=0)
@@ -291,32 +307,20 @@ class EvalQuant:
     #  Task 4 – free-running generation
     # ---------------------------------------------------------------------
     def step_free_running(self) -> None:
-        """
-        Generate a free-running sequence of tokens.
-        """
-        self._eval_psd_cov(self.generate(), prefix="gen")
+        """Generate a free-running sequence of tokens."""
+        # rollout_gen = self.generate_one_step_rollout()
+        # self._eval_psd_cov(rollout_gen, prefix="gen_1step")
+
+        # self.evaluate_random_recursive_rollouts(self.eval_args["gen_seconds"])
+
+        recursive_gen = self.generate()
+        self._eval_psd_cov(recursive_gen, prefix="gen")
+
         self._eval_psd_cov(self._get_test_deq(), prefix="test")
 
-    # ---------------------------------------------------------------------
-    #  Generation utilities
-    # ---------------------------------------------------------------------
-    @torch.inference_mode()
-    def generate(self) -> np.ndarray:
-        """Generate a sequence of length `1 + total_steps` (channels x time).
-
-        • Picks a **single random starting token** from the test set.
-        • Grows the sample in a `while` loop, each iteration requesting at most
-          `max_hist` new tokens from `_recursive_forecast`.
-        • Saves generated .npy and PSD/cov plots, then returns the de-quantised
-          array `(C, 1+total_steps)`.
-
-        Returns:
-            Array of shape (C, 1+total_steps) containing the generated sequence
-        """
-        total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
-        unroll_steps = self.eval_args.get("unroll_steps", 1)
-        print(f"Unroll steps during recursive forecasting: {unroll_steps}")
-
+    def _get_initial_example(
+        self, total_steps: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
         # ------- random single-token context -------
         trial_idx = random.randrange(len(self.train_dataset))
         quant_seq, _ = self.train_dataset[trial_idx]  # (...,T) or ((...,T), cond)
@@ -343,6 +347,31 @@ class EvalQuant:
 
         ctx = ctx_quant.unsqueeze(0).to(self.device)  # (1,...,1)
 
+        return ctx, cond_history, cond_pointer, cond_sequence_full
+
+    # ---------------------------------------------------------------------
+    #  Generation utilities
+    # ---------------------------------------------------------------------
+    @torch.inference_mode()
+    def generate(self) -> np.ndarray:
+        """Generate a sequence of length `1 + total_steps` (channels x time).
+
+        • Picks a **single random starting token** from the test set. • Grows the sample
+        in a `while` loop, each iteration requesting at most   `max_hist` new tokens
+        from `_recursive_forecast`. • Saves generated .npy and PSD/cov plots, then
+        returns the de-quantised   array `(C, 1+total_steps)`.
+
+        Returns:     Array of shape (C, 1+total_steps) containing the generated sequence
+        """
+        total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
+        unroll_steps = 1
+        print(f"Unroll steps during recursive forecasting: {unroll_steps}")
+
+        ctx, cond_history, cond_pointer, cond_sequence_full = self._get_initial_example(
+            total_steps
+        )
+        init_length = ctx.shape[-1]
+
         # ------- iterative growth -------
         steps_left = total_steps
 
@@ -352,17 +381,15 @@ class EvalQuant:
                 break
 
             N = unroll_steps
-            if ctx.shape[-1] < self.max_hist:
-                N = self.max_hist - 1  # full generation first
 
-            ctx_slice = ctx[..., -self.max_hist + N - 1 :]
+            ctx_slice = ctx[..., -self.max_hist + N - 1:]
             cond_future_chunk = None
             condition_inputs: Tuple[torch.Tensor, torch.Tensor] | None = None
             if cond_history is not None and cond_sequence_full is not None:
-                cond_slice = cond_history[..., -self.max_hist + N - 1 :]
+                cond_slice = cond_history[..., -self.max_hist + N - 1:]
                 assert cond_pointer is not None
                 cond_future_chunk = cond_sequence_full[
-                    ..., cond_pointer : cond_pointer + N
+                    ..., cond_pointer: cond_pointer + N
                 ].to(self.device)
                 if cond_future_chunk.shape[-1] < N:
                     raise RuntimeError(
@@ -384,16 +411,162 @@ class EvalQuant:
         pbar.close()
 
         gen_deq = mulaw_inv_torch(ctx.squeeze(0), self.mu)
-        gen_deq = gen_deq[..., ctx_quant.shape[-1] :]
+        gen_deq = gen_deq[..., init_length:]
 
         if hasattr(self.test_dataset, "postprocessor"):
             gen_deq = self.test_dataset.postprocessor.reshape(gen_deq)
 
         gen_deq = gen_deq.cpu().numpy()
 
-        strategy = self.eval_args["gen_sampling"]
+        strategy = self.eval_args.get("gen_sampling", "top_p")
         np.save(self.out_dir / f"generated_{strategy}.npy", gen_deq)
         return gen_deq
+
+    @torch.inference_mode()
+    def generate_one_step_rollout(self) -> np.ndarray:
+        """Generate a sequence via 1-step teacher-forced rollouts.
+
+        This stitches together contiguous windows from the **test** dataset, feeds each
+        window through the model, and records the final predicted timestep. Doing so
+        yields a sequence of predictions with the same length as the requested
+        generation horizon while avoiding recursive error accumulation.
+        """
+
+        total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
+        if total_steps <= 0:
+            raise ValueError("`gen_seconds` must be positive for rollouts.")
+
+        dataset_window = getattr(self.test_dataset, "length", None)
+        if dataset_window is None:
+            window_len = int(self._fallback_max_hist)
+        else:
+            window_len = max(int(dataset_window) - 1, 1)
+
+        required_tokens = window_len + total_steps - 1
+        quant_seq = self._assemble_quant_sequence(
+            self.test_dataset,
+            min_total_length=required_tokens,
+            drop_first_overlap=False,
+        )
+
+        seq_len = int(quant_seq.shape[-1])
+        if seq_len < required_tokens:
+            raise RuntimeError(
+                "Insufficient test data to run 1-step rollouts: "
+                f"need {required_tokens} tokens, got {seq_len}."
+            )
+
+        strategy = self.eval_args.get("gen_sampling", "top_p")
+        sample_args = {
+            "strategy": strategy,
+            "temperature": self.eval_args.get("temperature", 1.0),
+            "top_k": self.eval_args.get("top_k", 0),
+            "top_p": self.eval_args.get("top_p", 0.8),
+        }
+
+        num_windows = total_steps
+        predictions: List[Tensor] = []
+        pbar = tqdm(total=num_windows, desc="1-step-rollout")
+        start = 0
+        while start < num_windows:
+            end = min(start + self.batch_size, num_windows)
+            window_batch = torch.stack(
+                [quant_seq[..., idx: idx + window_len] for idx in range(start, end)],
+                dim=0,
+            )
+            window_batch = window_batch.to(self.device, non_blocking=True)
+            logits = self._fwd(window_batch)
+            next_logits = logits[..., -1, :]
+            next_tok = sample(next_logits, **sample_args)
+            predictions.append(next_tok.cpu())
+            pbar.update(end - start)
+            start = end
+        pbar.close()
+
+        pred_tokens = torch.cat(predictions, dim=0)  # (num_windows, C)
+        pred_tokens = pred_tokens.transpose(0, 1).contiguous()  # (C, num_windows)
+
+        gen_deq = mulaw_inv_torch(pred_tokens, self.mu)
+        if hasattr(self.test_dataset, "postprocessor"):
+            gen_deq = self.test_dataset.postprocessor.reshape(gen_deq)
+
+        gen_np = gen_deq.cpu().numpy()
+        np.save(self.out_dir / f"generated_1step_{strategy}.npy", gen_np)
+        return gen_np
+
+    @torch.inference_mode()
+    def evaluate_random_recursive_rollouts(self, num_samples: int) -> None:
+        """Evaluate PSD/Cov for 1-second recursive rollouts from random contexts."""
+
+        if num_samples <= 0:
+            return
+
+        horizon = max(int(round(self.sfreq)), self.eval_args.get("unroll_steps", 1))
+        dataset_len = len(self.test_dataset)
+        if dataset_len == 0:
+            raise RuntimeError("Test dataset is empty; cannot sample contexts.")
+
+        replace = num_samples > dataset_len
+        rng = np.random.default_rng()
+        indices = rng.choice(dataset_len, size=num_samples, replace=replace)
+
+        contexts: List[Tensor] = []
+        lengths: List[int] = []
+        for idx in tqdm(indices.tolist(), desc="random-rollout-contexts"):
+            inputs, _ = self.test_dataset[int(idx)]
+            if isinstance(inputs, (tuple, list)):
+                ctx = inputs[0]
+            else:
+                ctx = inputs
+            ctx = ctx.to(torch.long)
+            contexts.append(ctx)
+            lengths.append(int(ctx.shape[-1]))
+
+        context_len = int(min(lengths))
+        if context_len <= 0:
+            raise RuntimeError("Context length must be positive for rollouts.")
+
+        ctx_tensor = torch.stack([ctx[..., -context_len:] for ctx in contexts], dim=0)
+
+        preds: List[Tensor] = []
+        batch_iter = range(0, num_samples, self.batch_size)
+        for start in tqdm(batch_iter, desc="random-rollout-forecast"):
+            end = min(start + self.batch_size, num_samples)
+            ctx_batch = ctx_tensor[start:end].to(self.device, non_blocking=True)
+            new_tokens = self._recursive_forecast(ctx_batch, horizon)
+            preds.append(new_tokens.cpu())
+
+        pred_tokens = torch.cat(preds, dim=0)
+        pred_float = mulaw_inv_torch(pred_tokens, self.mu)
+
+        if hasattr(self.test_dataset, "postprocessor"):
+            pred_float = self.test_dataset.postprocessor.reshape(pred_float)
+
+        rollouts = pred_float.cpu().numpy()
+
+        if rollouts.ndim == 2:
+            rollouts = rollouts[None, ...]
+
+        nperseg = max(1, min(horizon, int(round(self.sfreq))))
+        freq_axis, psd = signal.welch(
+            rollouts,
+            fs=self.sfreq,
+            axis=-1,
+            nperseg=nperseg,
+            scaling="density",
+        )
+        psd_mean = psd.mean(axis=0)
+
+        cov_chunks = np.stack([np.cov(window) for window in rollouts], axis=0)
+        cov_mean = cov_chunks.mean(axis=0)
+
+        np.save(self.out_dir / "random_rollout_psd_mean.npy", psd_mean)
+        np.save(self.out_dir / "random_rollout_psd_freqs.npy", freq_axis)
+        np.save(self.out_dir / "random_rollout_cov_mean.npy", cov_mean)
+
+        prefix = "random_rollout_mean"
+        self._plot_psd_from_values(freq_axis, psd_mean, prefix)
+        self._plot_covariance_matrix(cov_mean, prefix)
 
     @torch.inference_mode()
     def _recursive_forecast(
@@ -404,19 +577,16 @@ class EvalQuant:
     ) -> Tensor:
         """Forecast *N* tokens given `ctx`; supports various sampling strategies.
 
-        Args:
-            ctx: Context tensor of shape (B, C, max_hist)
-            N: Forecast horizon
+        Args:     ctx: Context tensor of shape (B, C, max_hist)     N: Forecast horizon
 
-        Returns:
-            Tensor of shape (B, C, N) containing the integer-bin predictions for
-            the *N* future steps.
+        Returns:     Tensor of shape (B, C, N) containing the integer-bin predictions
+        for     the *N* future steps.
         """
         sample_args = {
-            "strategy": self.eval_args["gen_sampling"],
+            "strategy": self.eval_args.get(["gen_sampling"], "top_p"),
             "temperature": self.eval_args.get("temperature", 1.0),
             "top_k": self.eval_args.get("top_k", 0),
-            "top_p": self.eval_args.get("top_p", 0.0),
+            "top_p": self.eval_args.get("top_p", 0.8),
         }
 
         cond_hist: Tensor | None = None
@@ -440,11 +610,16 @@ class EvalQuant:
         cache = {}
         for i in range(N):
             model_input: Tensor | Tuple[Tensor, Tensor]
+
+            # truncate seq to length of ctx
+            seq = seq[..., -ctx.shape[-1]:]
+
             if cond_seq is not None:
                 if cond_future is None:
                     raise ValueError(
                         "Future condition sequence missing while conditioning enabled."
                     )
+                cond_seq = cond_seq[..., -ctx.shape[-1]:]
                 model_input = (seq, cond_seq)
             else:
                 model_input = seq
@@ -458,30 +633,95 @@ class EvalQuant:
 
             next_logits = logits[..., -1, :]  # (B,...,Q)
             next_tok = sample(next_logits, **sample_args)  # (B,...)
+            if self.postprocessor is not None:
+                H = self.train_dataset.image_size
+                row_idx = self.postprocessor.row_idx
+                col_idx = self.postprocessor.col_idx
+
+                img = (
+                    torch.ones((1, H, H), dtype=next_tok.dtype, device=next_tok.device)
+                    * self.train_dataset.fill_value
+                )
+                img[:, row_idx, col_idx] = next_tok[:, row_idx, col_idx]
+                next_tok = img
+
             generated.append(next_tok)
 
             if cache:
                 seq = next_tok.unsqueeze(-1)
                 if cond_seq is not None:
-                    next_cond = cond_future[..., i : i + 1]
+                    next_cond = cond_future[..., i: i + 1]
                     cond_seq = next_cond
             else:
                 seq = torch.cat([seq, next_tok.unsqueeze(-1)], dim=-1)
                 if cond_seq is not None:
-                    next_cond = cond_future[..., i : i + 1]
+                    next_cond = cond_future[..., i: i + 1]
                     cond_seq = torch.cat([cond_seq, next_cond], dim=-1)
         return torch.stack(generated, dim=-1)  # (B,...,N)
 
     # -----------------------------------
     # Helper functions
     # -----------------------------------
-    def _eval_psd_cov(self, data: np.ndarray, prefix: str) -> None:
-        """
-        Evaluate the PSD and covariance of the data.
+    def _assemble_quant_sequence(
+        self,
+        dataset: Dataset,
+        *,
+        min_total_length: Optional[int] = None,
+        drop_first_overlap: bool = True,
+    ) -> torch.Tensor:
+        """Concatenate dataset windows into a continuous quantised sequence."""
 
-        Args:
-            data: Array of shape (C, T) containing the data
-            prefix: Prefix for the filenames
+        if len(dataset) == 0:
+            raise RuntimeError("Dataset is empty; cannot assemble sequence.")
+
+        chunks: List[torch.Tensor] = []
+        total = 0
+        first_chunk = True
+        for idx in range(len(dataset)):
+            inputs, _ = dataset[idx]
+            if isinstance(inputs, (tuple, list)):
+                chunk = inputs[0]
+            else:
+                chunk = inputs
+
+            chunk = chunk.detach().cpu()
+            overlap = (
+                self.input_overlap if (drop_first_overlap or not first_chunk) else 0
+            )
+            if overlap > 0:
+                chunk = chunk[..., overlap:]
+
+            if chunk.shape[-1] == 0:
+                first_chunk = False
+                continue
+
+            chunks.append(chunk)
+            total += int(chunk.shape[-1])
+            first_chunk = False
+
+            if min_total_length is not None and total >= min_total_length:
+                break
+
+        if not chunks:
+            raise RuntimeError("Unable to assemble seq; encountered empty windows.")
+
+        sequence = torch.cat(chunks, dim=-1)
+
+        if min_total_length is not None:
+            if sequence.shape[-1] < min_total_length:
+                raise RuntimeError(
+                    "Insufficient tokens for requested sequence: "
+                    f"need {min_total_length}, got {sequence.shape[-1]}."
+                )
+            sequence = sequence[..., :min_total_length]
+
+        return sequence
+
+    def _eval_psd_cov(self, data: np.ndarray, prefix: str) -> None:
+        """Evaluate the PSD and covariance of the data.
+
+        Args:     data: Array of shape (C, T) containing the data     prefix: Prefix for
+        the filenames
         """
 
         fig = plot_psd(data, self.sfreq, prefix)
@@ -493,6 +733,41 @@ class EvalQuant:
         # Covariance
         cov = np.cov(data)
         np.save(self.out_dir / f"{prefix}_cov.npy", cov)
+        fig, ax = plt.subplots(figsize=(15, 15))
+        im = ax.imshow(cov, cmap="viridis")
+        ax.set_title(f"Covariance - {prefix}")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.savefig(self.out_dir / f"{prefix}_cov.pdf", bbox_inches="tight")
+        fig.savefig(self.out_dir / f"{prefix}_cov.png", bbox_inches="tight")
+        plt.close(fig)
+
+    def _plot_psd_from_values(
+        self, freqs: np.ndarray, psd: np.ndarray, prefix: str
+    ) -> None:
+        """Save PSD plot given explicit frequency and PSD arrays."""
+
+        fig, ax = plt.subplots(figsize=(15, 10))
+        ax.plot(freqs, psd.T, alpha=0.3)
+        ax.set_xlabel("Hz")
+        ax.set_ylabel("Power")
+        ax.set_title(f"PSD - {prefix}")
+        ax.set_yscale("log")
+
+        psd_flat = psd.flatten()
+        psd_flat = psd_flat[psd_flat > 0]
+        if psd_flat.size > 0:
+            lower = np.percentile(psd_flat, 0.1)
+            upper = np.percentile(psd_flat, 99.9)
+            if lower > 0 and upper > lower:
+                ax.set_ylim([lower, upper])
+
+        fig.savefig(self.out_dir / f"{prefix}_psd.pdf", bbox_inches="tight")
+        fig.savefig(self.out_dir / f"{prefix}_psd.png", bbox_inches="tight")
+        plt.close(fig)
+
+    def _plot_covariance_matrix(self, cov: np.ndarray, prefix: str) -> None:
+        """Save a covariance heatmap with consistent styling."""
+
         fig, ax = plt.subplots(figsize=(15, 15))
         im = ax.imshow(cov, cmap="viridis")
         ax.set_title(f"Covariance - {prefix}")
@@ -525,27 +800,19 @@ class EvalQuant:
         return model
 
     def _get_max_hist(self) -> int:
-        # 1) user override in config
-        if (mh := self.model_cfg.get("gpt2_config", {}).get("n_positions")) is not None:
-            return int(mh)
-        # 2) attribute on model
+        # 1) attribute on model
         if hasattr(self.model, "max_history"):
             return int(self.model.max_history)
-        # 3) gpt‑like model
-        if hasattr(self.model, "config") and hasattr(self.model.config, "n_positions"):
-            return int(self.model.config.n_positions)
-        # 4) fallback – derive from dataset example length
+        # 2) fallback – derive from dataset example length
         return self._fallback_max_hist
 
     def _plot_topomap(self, data: np.ndarray, fname: str, **kwargs) -> None:
-        """
-        Plot a topomap of the data.
+        """Plot a topomap of the data.
 
-        Args:
-            data: Array of shape (C, N) containing the metric value for *C* channels
-            across *N* horizon steps.
-            fname: Filename (within ``self.out_dir``) for the figure.
-            **kwargs: Additional arguments for ``mne.viz.plot_topomap``.
+        Args:     data: Array of shape (C, N) containing the metric value for *C*
+        channels     across *N* horizon steps.     fname: Filename (within
+        ``self.out_dir``) for the figure.     **kwargs: Additional arguments for
+        ``mne.viz.plot_topomap``.
         """
         fig = plt.figure(figsize=(15, 15), dpi=300)
 
@@ -594,20 +861,13 @@ class EvalQuant:
     ) -> None:
         """Plot each channel's forecast-horizon curve together with the mean.
 
-        Parameters
-        ----------
-        arr : np.ndarray
-            Array of shape (C, N) containing the metric value for *C* channels
-            across *N* horizon steps.  The legacy shape (N, C) is still
-            accepted and automatically transposed.
-        fname : str
-            Filename (within ``self.out_dir``) for the figure.
-        ylabel : str
-            Y-axis label, e.g. "Accuracy" or "MSE".
-        xlabel : str
-            X-axis label, e.g. "Forecast horizon (steps)" or "History length (tokens)".
-        hist_lengths : Optional[List[int]]
-            List of history lengths to plot.
+        Parameters ---------- arr : np.ndarray     Array of shape (C, N) containing the
+        metric value for *C* channels     across *N* horizon steps.  The legacy shape
+        (N, C) is still     accepted and automatically transposed. fname : str
+        Filename (within ``self.out_dir``) for the figure. ylabel : str     Y-axis
+        label, e.g. "Accuracy" or "MSE". xlabel : str     X-axis label, e.g. "Forecast
+        horizon (steps)" or "History length (tokens)". hist_lengths :
+        Optional[List[int]]     List of history lengths to plot.
         """
 
         if data.ndim != 2:
@@ -657,9 +917,8 @@ class EvalQuant:
     def _assemble_condition_sequence(
         self, start_idx: int, required_length: int, initial_cond: Tensor
     ) -> Tensor:
-        """
-        Concatenate condition labels starting from `start_idx` until `required_length`.
-        """
+        """Concatenate condition labels starting from `start_idx` until
+        `required_length`."""
 
         dataset_len = len(self.train_dataset)
         if dataset_len == 0:
@@ -688,23 +947,17 @@ class EvalQuant:
         return cond_seq[..., :required_length]
 
     def _get_test_deq(self) -> np.ndarray:
-        """
-        Get the de-quantised test set.
+        """Get the de-quantised test set.
 
-        Returns:
-            Array of shape (C, T_total) containing the de-quantised test set
+        Returns:     Array of shape (C, T_total) containing the de-quantised test set
         """
         if self._cached_test_deq is None:
             print("[EVAL] Assembling de-quantised full test set …")
-            quant_chans: List[np.ndarray] = [np.empty((*self.channel_shape, 0))]
-            for i, (inp, _) in tqdm(
-                enumerate(self.dataset), desc="assembling dataset"
-            ):
-                if isinstance(inp, (tuple, list)):
-                    inp = inp[0]
-                inp = inp[..., self.input_overlap :]
-                quant_chans.append(inp.cpu().numpy())
-            self._cached_quant_test_deq = np.concatenate(quant_chans, axis=-1)
+            quant_tensor = self._assemble_quant_sequence(
+                self.dataset,
+                drop_first_overlap=True,
+            )
+            self._cached_quant_test_deq = quant_tensor.numpy()
 
             # save to file
             if self.save_test_data:
@@ -724,8 +977,9 @@ class EvalQuant:
     @torch.inference_mode()
     def _fwd(self, *args, **kwargs):
         device_type = "cuda" if self.device == "cuda" else "cpu"
+        dtype = torch.float16 if self.dtype == "float16" else torch.float32
         ctx_mgr = torch.autocast(
-            device_type, dtype=torch.float16, enabled=self.device == "cuda"
+            device_type, dtype=dtype, enabled=self.device == "cuda"
         )
         with ctx_mgr:
             return self.model(*args, **kwargs)

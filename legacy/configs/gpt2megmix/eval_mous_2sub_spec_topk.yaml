@@ -1,0 +1,41 @@
+# Separate model configuration file
+model_config: configs/gpt2megmix/model68_small_reg.yaml
+
+save_dir: /vol/data/trainings/mous/2sub/1to50hz_ss/gpt2megmix_spec/
+resume_from: null
+
+model_name: GPT2MEGMix
+loss_name: CrossEntropySpectral
+eval_class: EvalQuant
+
+datasplitter:
+  dataset_class: ChunkDataset
+  dataset_root: "/vol/data/datasets/MOUS/preprocessed_ss"
+  example_seconds: 3.0
+  overlap_seconds: 1.5
+  val_ratio: 0.0
+  test_ratio: 0.33
+  dataset_kwargs:
+    fill_value: 127
+    has_condition: true
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+eval:
+  accelerator: cuda
+  save_test_data: false
+  use_test_dataset: false
+  future_steps: 10
+  unroll_steps: 1
+  gen_seconds: 60
+  gen_sampling: top_k
+  channel_shape: [68]
+  num_channels: 68
+  temperature: 0.7
+  top_k: 20
+  ckpt_path: /vol/data/trainings/mous/2sub/1to50hz_ss/gpt2megmix_spec/lightning_logs/version_0/checkpoints/best-checkpoint.ckpt

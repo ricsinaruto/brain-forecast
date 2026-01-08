@@ -19,19 +19,13 @@ def sdpa_gptoss(
     sliding_window: int = 0,
     causal: bool = False,
 ) -> Tensor:
-    """
-    Scaled Dot-Product Attention
+    """Scaled Dot-Product Attention.
 
-    Args:
-        Q: (n_tokens, n_heads, q_mult, d_head)
-        K: (n_tokens, n_heads, d_head)
-        V: (n_tokens, n_heads, d_head)
-        S: (n_heads, q_mult, 1, 1)
-        sm_scale: float
-        sliding_window: int
+    Args:     Q: (n_tokens, n_heads, q_mult, d_head)     K: (n_tokens, n_heads, d_head)
+    V: (n_tokens, n_heads, d_head)     S: (n_heads, q_mult, 1, 1)     sm_scale: float
+    sliding_window: int
 
-    Returns:
-        (n_tokens, n_heads, q_mult, d_head)
+    Returns:     (n_tokens, n_heads, q_mult, d_head)
     """
     # Supports either flattened tensors (tokens-first) or batched tensors.
     if Q.ndim == 4:
@@ -275,13 +269,13 @@ class MultiHeadAttentionGPTOSS(torch.nn.Module):
         k = qkv[
             ...,
             self.num_attention_heads
-            * self.head_dim : (self.num_attention_heads + self.num_key_value_heads)
+            * self.head_dim: (self.num_attention_heads + self.num_key_value_heads)
             * self.head_dim,
         ].contiguous()
         v = qkv[
             ...,
             (self.num_attention_heads + self.num_key_value_heads)
-            * self.head_dim : (self.num_attention_heads + 2 * self.num_key_value_heads)
+            * self.head_dim: (self.num_attention_heads + 2 * self.num_key_value_heads)
             * self.head_dim,
         ].contiguous()
 
@@ -337,18 +331,14 @@ class MultiHeadAttentionGPTOSS(torch.nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    """
-    Computes multi-head attention. Supports nested or padded tensors.
+    """Computes multi-head attention. Supports nested or padded tensors.
 
-    Args:
-        E_q (int): Size of embedding dim for query
-        E_k (int): Size of embedding dim for key
-        E_v (int): Size of embedding dim for value
-        E_total (int): Total embedding dim of combined heads post input projection.
-            Each head has dim E_total // nheads
-        nheads (int): Number of heads
-        dropout (float, optional): Dropout probability. Default: 0.0
-        bias (bool, optional): Whether to add bias to input projection. Default: True
+    Args:     E_q (int): Size of embedding dim for query     E_k (int): Size of
+    embedding dim for key     E_v (int): Size of embedding dim for value     E_total
+    (int): Total embedding dim of combined heads post input projection.         Each
+    head has dim E_total // nheads     nheads (int): Number of heads     dropout (float,
+    optional): Dropout probability. Default: 0.0     bias (bool, optional): Whether to
+    add bias to input projection. Default: True
     """
 
     def __init__(
@@ -454,23 +444,16 @@ class MultiHeadAttention(nn.Module):
         causal: bool = False,
         attn_mask: torch.Tensor = None,
     ) -> torch.Tensor:
-        """
-        Forward pass; runs the following process:
-            1. Apply input projection
-            2. Split heads and prepare for SDPA
-            3. Run SDPA
-            4. Apply output projection
+        """Forward pass; runs the following process: 1. Apply input projection 2. Split
+        heads and prepare for SDPA 3. Run SDPA 4. Apply output projection.
 
-        Args:
-            query (torch.Tensor): query of shape (N, L_q, E_qk)
-            key (torch.Tensor): key of shape (N, L_kv, E_qk)
-            value (torch.Tensor): value of shape (N, L_kv, E_v)
-            attn_mask (torch.Tensor, optional): attention mask of shape (N, L_q, L_kv)
-                to pass to sdpa. Default: None
-            is_causal (bool, optional): Whether to apply causal mask. Default: False
+        Args:     query (torch.Tensor): query of shape (N, L_q, E_qk)     key
+        (torch.Tensor): key of shape (N, L_kv, E_qk)     value (torch.Tensor): value of
+        shape (N, L_kv, E_v)     attn_mask (torch.Tensor, optional): attention mask of
+        shape (N, L_q, L_kv)         to pass to sdpa. Default: None     is_causal (bool,
+        optional): Whether to apply causal mask. Default: False
 
-        Returns:
-            attn_output (torch.Tensor): output of shape (N, L_t, E_q)
+        Returns:     attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
         query, key, value = self.qkv_projection(query, key, value)
 
@@ -528,7 +511,7 @@ class MultiHeadAttentionCond(MultiHeadAttention):
         logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(Dh)  # [B,H,S,S]
 
         if causal:
-            attn_mask = torch.full((S, S), float('-inf'), device=q.device)
+            attn_mask = torch.full((S, S), float("-inf"), device=q.device)
             attn_mask = torch.triu(attn_mask, diagonal=1)  # -inf above diagonal
             logits = logits + attn_mask
 

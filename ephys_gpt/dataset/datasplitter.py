@@ -7,37 +7,64 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import torch
+
+try:
+    from pnpl.datasets import LibriBrainPhoneme
+except Exception:  # pragma: no cover - optional dependency
+    LibriBrainPhoneme = None
+
 
 from .datasets import (
     ChunkDataset,
     ChunkDatasetForecastCont,
-    ChunkDatasetImage,
     ChunkDatasetImage01,
     ChunkDatasetImageQuantized,
     ChunkDatasetJIT,
     ChunkDatasetReconstruction,
-    ChunkDatasetMous,
     ChunkDatasetMasked,
     ChunkDatasetSubset,
-    ChunkDatasetCondition,
-    ChunkDatasetImageQuantizedCondition,
-    ChunkDatasetImageCondition,
+    ChunkDatasetImageReconstruction,
+    ChunkDataset3D,
+    ChunkDatasetSensor3D,
+    ChunkDatasetInterpolatedImage,
+    BPEDataset,
 )
+
+try:
+    from .libribrain import (
+        RandomLabelGroupedDataset,
+        FusedGroupedIterable,
+        GroupedDatasetAugmented,
+        IndexedLabelGroupedDataset,
+        SessionGroupedDataset,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    RandomLabelGroupedDataset = None
+    FusedGroupedIterable = None
+    GroupedDatasetAugmented = None
+    IndexedLabelGroupedDataset = None
+    SessionGroupedDataset = None
 
 DATASET_CLASSES = {
     "ChunkDataset": ChunkDataset,
     "ChunkDatasetReconstruction": ChunkDatasetReconstruction,
     "ChunkDatasetForecastCont": ChunkDatasetForecastCont,
-    "ChunkDatasetImage": ChunkDatasetImage,
     "ChunkDatasetImageQuantized": ChunkDatasetImageQuantized,
     "ChunkDatasetJIT": ChunkDatasetJIT,
     "ChunkDatasetImage01": ChunkDatasetImage01,
-    "ChunkDatasetMous": ChunkDatasetMous,
+    "ChunkDatasetImageReconstruction": ChunkDatasetImageReconstruction,
+    "ChunkDatasetInterpolatedImage": ChunkDatasetInterpolatedImage,
+    "RandomLabelGroupedDataset": RandomLabelGroupedDataset,
+    "IndexedLabelGroupedDataset": IndexedLabelGroupedDataset,
+    "FusedGroupedIterable": FusedGroupedIterable,
+    "GroupedDatasetAugmented": GroupedDatasetAugmented,
+    "SessionGroupedDataset": SessionGroupedDataset,
     "ChunkDatasetMasked": ChunkDatasetMasked,
     "ChunkDatasetSubset": ChunkDatasetSubset,
-    "ChunkDatasetCondition": ChunkDatasetCondition,
-    "ChunkDatasetImageQuantizedCondition": ChunkDatasetImageQuantizedCondition,
-    "ChunkDatasetImageCondition": ChunkDatasetImageCondition,
+    "ChunkDataset3D": ChunkDataset3D,
+    "ChunkDatasetSensor3D": ChunkDatasetSensor3D,
+    "BPEDataset": BPEDataset,
 }
 
 
@@ -72,16 +99,45 @@ class ChannelEntry:
     pos_sum: np.ndarray
     count: int
     ch_type: Union[int, str]
+    pos3d_sum: Optional[np.ndarray] = None
+    ori_sum: Optional[np.ndarray] = None
     names: set[str] = field(default_factory=set)
 
-    def update(self, pos: np.ndarray, name: str) -> None:
+    def update(
+        self,
+        pos: np.ndarray,
+        name: str,
+        *,
+        pos_3d: Optional[np.ndarray] = None,
+        ori_3d: Optional[np.ndarray] = None,
+    ) -> None:
         self.pos_sum += pos
         self.count += 1
         self.names.add(name)
+        if pos_3d is not None:
+            if self.pos3d_sum is None:
+                self.pos3d_sum = np.zeros_like(pos_3d, dtype=np.float64)
+            self.pos3d_sum += pos_3d
+        if ori_3d is not None:
+            if self.ori_sum is None:
+                self.ori_sum = np.zeros_like(ori_3d, dtype=np.float64)
+            self.ori_sum += ori_3d
 
     @property
     def mean_pos(self) -> np.ndarray:
         return (self.pos_sum / max(self.count, 1)).astype(np.float32)
+
+    @property
+    def mean_pos3d(self) -> Optional[np.ndarray]:
+        if self.pos3d_sum is None:
+            return None
+        return (self.pos3d_sum / max(self.count, 1)).astype(np.float32)
+
+    @property
+    def mean_ori(self) -> Optional[np.ndarray]:
+        if self.ori_sum is None:
+            return None
+        return (self.ori_sum / max(self.count, 1)).astype(np.float32)
 
     @property
     def canonical_name(self) -> str:
@@ -97,6 +153,8 @@ class ChannelLayout:
     names: List[str]
     types: List[Union[int, str]]
     pos_2d: np.ndarray
+    pos_3d: Optional[np.ndarray] = None
+    ori_3d: Optional[np.ndarray] = None
 
     def as_numpy_types(self) -> np.ndarray:
         return np.array(self.types)
@@ -125,6 +183,8 @@ class SessionMetadata:
     pos_2d: np.ndarray
     ch_types: Optional[List[Union[int, str]]]
     sfreq: float
+    pos_3d: Optional[np.ndarray] = None
+    ori_3d: Optional[np.ndarray] = None
 
 
 def _normalise_roots(
@@ -219,6 +279,14 @@ def _save_dataset_cache(
 
 def _metadata_from_cache(entry: Dict[str, object]) -> SessionMetadata:
     pos_array = np.asarray(entry["pos_2d"], dtype=np.float32)
+    pos3d_entry = entry.get("pos_3d")
+    ori_entry = entry.get("ori_3d")
+    pos3d_array = (
+        np.asarray(pos3d_entry, dtype=np.float32) if pos3d_entry is not None else None
+    )
+    ori_array = (
+        np.asarray(ori_entry, dtype=np.float32) if ori_entry is not None else None
+    )
     ch_types = entry.get("ch_types")
     return SessionMetadata(
         chunk_files=list(entry["chunk_files"]),
@@ -228,11 +296,13 @@ def _metadata_from_cache(entry: Dict[str, object]) -> SessionMetadata:
         pos_2d=pos_array,
         ch_types=list(ch_types) if ch_types is not None else None,
         sfreq=float(entry["sfreq"]),
+        pos_3d=pos3d_array,
+        ori_3d=ori_array,
     )
 
 
 def _metadata_to_cache(metadata: SessionMetadata) -> Dict[str, object]:
-    return {
+    payload = {
         "chunk_files": metadata.chunk_files,
         "chunk_length": metadata.chunk_length,
         "last_chunk_length": metadata.last_chunk_length,
@@ -241,6 +311,13 @@ def _metadata_to_cache(metadata: SessionMetadata) -> Dict[str, object]:
         "ch_types": metadata.ch_types,
         "sfreq": metadata.sfreq,
     }
+    payload["pos_3d"] = (
+        metadata.pos_3d.tolist() if metadata.pos_3d is not None else None
+    )
+    payload["ori_3d"] = (
+        metadata.ori_3d.tolist() if metadata.ori_3d is not None else None
+    )
+    return payload
 
 
 def _prepare_datasets(
@@ -285,7 +362,11 @@ def _prepare_datasets(
             if cache_dir_path is not None and not refresh_cache:
                 cached_entry = dataset_cache.get(session)
                 if cached_entry:  # and cached_entry.get("chunk_files") == chunk_files:
-                    metadata = _metadata_from_cache(cached_entry)
+                    missing_geom = (
+                        "pos_3d" not in cached_entry or "ori_3d" not in cached_entry
+                    )
+                    if not missing_geom:
+                        metadata = _metadata_from_cache(cached_entry)
 
             if metadata is None:
                 chunk_files = _list_chunk_files(session_path)
@@ -305,6 +386,25 @@ def _prepare_datasets(
                         f"Session {session} in dataset {dataset_key} has no 2D pos"
                     )
 
+                pos_3d = first_chunk.get("pos_3d")
+                pos_3d_arr = (
+                    np.asarray(pos_3d, dtype=np.float32) if pos_3d is not None else None
+                )
+                if pos_3d_arr is not None:
+                    if pos_3d_arr.shape[0] != len(ch_names) or pos_3d_arr.shape[1] != 3:
+                        raise ValueError(
+                            f"Session {session} in {dataset_key} has mismatched pos_3d."
+                        )
+                ori_3d = first_chunk.get("ori_3d")
+                ori_3d_arr = (
+                    np.asarray(ori_3d, dtype=np.float32) if ori_3d is not None else None
+                )
+                if ori_3d_arr is not None:
+                    if ori_3d_arr.shape[0] != len(ch_names) or ori_3d_arr.shape[1] != 3:
+                        raise ValueError(
+                            f"Session {session} in {dataset_key} has mismatched ori_3d."
+                        )
+
                 ch_types = first_chunk.get("ch_types")
                 chunk_length = int(first_chunk["data"].shape[1])
                 last_chunk_length = chunk_length
@@ -320,12 +420,18 @@ def _prepare_datasets(
                     pos_2d=pos_2d,
                     ch_types=list(ch_types) if ch_types is not None else None,
                     sfreq=float(first_chunk.get("sfreq")),
+                    pos_3d=pos_3d_arr,
+                    ori_3d=ori_3d_arr,
                 )
             else:
                 ch_types = metadata.ch_types
 
             session_channels[(dataset_key, session)] = registry.register(
-                metadata.ch_names, metadata.pos_2d, ch_types
+                metadata.ch_names,
+                metadata.pos_2d,
+                ch_types,
+                pos_3d=metadata.pos_3d,
+                ori_3d=metadata.ori_3d,
             )
 
             sfreq = float(metadata.sfreq)
@@ -439,8 +545,8 @@ def _split_sessions(
         train_count = n_total - val_count - test_count
 
     train = sessions[:train_count]
-    val = sessions[train_count : train_count + val_count]
-    test = sessions[train_count + val_count : train_count + val_count + test_count]
+    val = sessions[train_count: train_count + val_count]
+    test = sessions[train_count + val_count: train_count + val_count + test_count]
 
     return train, val, test
 
@@ -465,26 +571,56 @@ class ChannelRegistry:
         ch_names: Sequence[str],
         pos_2d: np.ndarray,
         ch_types: Optional[Sequence[Union[int, str]]] = None,
+        *,
+        pos_3d: Optional[np.ndarray] = None,
+        ori_3d: Optional[np.ndarray] = None,
     ) -> SessionChannels:
         if ch_types is None:
             ch_types = ["unknown"] * len(ch_names)
 
         canonical_indices = np.empty(len(ch_names), dtype=np.int64)
+        pos3d_arr = np.asarray(pos_3d, dtype=np.float64) if pos_3d is not None else None
+        ori_arr = np.asarray(ori_3d, dtype=np.float64) if ori_3d is not None else None
 
         for idx, (name, pos, ch_type) in enumerate(zip(ch_names, pos_2d, ch_types)):
+            pos3d = pos3d_arr[idx] if pos3d_arr is not None else None
+            ori_vec = ori_arr[idx] if ori_arr is not None else None
             key = self._make_key(np.asarray(pos), ch_type)
             if key not in self._key_to_index:
                 entry = ChannelEntry(
                     pos_sum=np.asarray(pos, dtype=np.float64),
                     count=1,
                     ch_type=ch_type,
+                    pos3d_sum=(
+                        np.asarray(pos3d, dtype=np.float64)
+                        if pos3d is not None
+                        else None
+                    ),
+                    ori_sum=(
+                        np.asarray(ori_vec, dtype=np.float64)
+                        if ori_vec is not None
+                        else None
+                    ),
                     names={name},
                 )
                 self._key_to_index[key] = len(self._entries)
                 self._entries.append(entry)
             else:
                 entry = self._entries[self._key_to_index[key]]
-                entry.update(np.asarray(pos, dtype=np.float64), name)
+                entry.update(
+                    np.asarray(pos, dtype=np.float64),
+                    name,
+                    pos_3d=(
+                        np.asarray(pos3d, dtype=np.float64)
+                        if pos3d is not None
+                        else None
+                    ),
+                    ori_3d=(
+                        np.asarray(ori_vec, dtype=np.float64)
+                        if ori_vec is not None
+                        else None
+                    ),
+                )
 
             canonical_indices[idx] = self._key_to_index[key]
 
@@ -494,7 +630,27 @@ class ChannelRegistry:
         names = [entry.canonical_name for entry in self._entries]
         types = [entry.ch_type for entry in self._entries]
         pos = np.stack([entry.mean_pos for entry in self._entries], axis=0)
-        return ChannelLayout(names=names, types=types, pos_2d=pos)
+        pos3d = None
+        if any(entry.mean_pos3d is not None for entry in self._entries):
+            pos3d = np.zeros((len(self._entries), 3), dtype=np.float32)
+            for idx, entry in enumerate(self._entries):
+                if entry.mean_pos3d is not None:
+                    pos3d[idx] = entry.mean_pos3d
+
+        ori = None
+        if any(entry.mean_ori is not None for entry in self._entries):
+            ori = np.zeros((len(self._entries), 3), dtype=np.float32)
+            for idx, entry in enumerate(self._entries):
+                if entry.mean_ori is not None:
+                    vec = entry.mean_ori
+                    norm = np.linalg.norm(vec)
+                    if norm > 0:
+                        vec = vec / norm
+                    ori[idx] = vec
+
+        return ChannelLayout(
+            names=names, types=types, pos_2d=pos, pos_3d=pos3d, ori_3d=ori
+        )
 
 
 def build_indices(session_dir: str, example_len: float, overlap: float) -> Tuple[
@@ -507,9 +663,9 @@ def build_indices(session_dir: str, example_len: float, overlap: float) -> Tuple
 ]:
     """Legacy helper that mirrors the historical build_indices API.
 
-    This function now routes through the multi-dataset-aware preparation logic
-    but only supports a single `session_dir`. It is kept for backwards
-    compatibility with older tests and utilities.
+    This function now routes through the multi-dataset-aware preparation logic but only
+    supports a single `session_dir`. It is kept for backwards compatibility with older
+    tests and utilities.
     """
 
     prepared = _prepare_datasets(session_dir, example_len, overlap)
@@ -556,18 +712,16 @@ def split_datasets(
 ) -> Split:
     """Create train/val/test splits across one or more MEG datasets.
 
-    Parameters mirror the legacy interface but now support multiple dataset
-    roots. Each dataset is split independently before concatenating indices so
-    that distributional differences do not leak between splits. All channel
-    layouts are merged into a canonical ordering that downstream datasets use
-    to produce consistent tensors regardless of missing sensors.
+    Parameters mirror the legacy interface but now support multiple dataset roots. Each
+    dataset is split independently before concatenating indices so that distributional
+    differences do not leak between splits. All channel layouts are merged into a
+    canonical ordering that downstream datasets use to produce consistent tensors
+    regardless of missing sensors.
 
-    Args:
-        cache_dir: Optional directory to persist session metadata between runs.
-            When provided, the datasplitter will avoid reloading chunk files on
-            subsequent startups by replaying cached metadata. Use
-            ``refresh_cache=True`` if new data has been added and the cache
-            should be rebuilt.
+    Args:     cache_dir: Optional directory to persist session metadata between runs.
+    When provided, the datasplitter will avoid reloading chunk files on
+    subsequent startups by replaying cached metadata. Use         ``refresh_cache=True``
+    if new data has been added and the cache         should be rebuilt.
     """
 
     dataset_kwargs = dataset_kwargs or {}
@@ -615,6 +769,8 @@ def split_datasets(
         length=prepared.window_size,
         ch_names=prepared.layout.names,
         pos_2d=prepared.layout.pos_2d,
+        pos_3d=prepared.layout.pos_3d,
+        ori_3d=prepared.layout.ori_3d,
         sfreq=prepared.sfreq,
         ch_types=prepared.layout.types,
         session_channels=prepared.session_channels,
@@ -626,3 +782,112 @@ def split_datasets(
     test_ds = dataset_class_impl(indices=test_idx, **common_kwargs)
 
     return Split(train_ds, val_ds, test_ds)
+
+
+@dataclass
+class SplitLibriBrain:
+    train: RandomLabelGroupedDataset
+    val: RandomLabelGroupedDataset
+    test: RandomLabelGroupedDataset
+
+
+def split_datasets_libribrain(
+    dataset_root: str,
+    tmin: float = 0.0,
+    tmax: float = 0.5,
+    grouped_samples_std: int = 0,
+    grouped_samples_mean: int = 100,
+    quantize: bool = False,
+    quant_levels: int = 256,
+    dataset_class: str = "RandomLabelGroupedDataset",
+    save_examples: bool = False,
+    normalize: bool = False,
+    augmentations: Optional[str] = None,
+    dataset_args: Optional[dict] = None,
+):
+    if LibriBrainPhoneme is None:
+        raise ImportError(
+            "pnpl is required for Libribrain datasets but is not installed."
+        )
+    dataset_args = dataset_args or {}
+
+    train_dataset = LibriBrainPhoneme(
+        data_path=f"{dataset_root}/data/",
+        partition="train",
+        # include_run_keys=[("0", str(i), "Sherlock1", "1") for i in range(1, 10)],
+        tmin=tmin,
+        tmax=tmax,
+    )
+
+    val_dataset = LibriBrainPhoneme(
+        data_path=f"{dataset_root}/data/",
+        partition="validation",
+        tmin=tmin,
+        tmax=tmax,
+    )
+
+    test_dataset = LibriBrainPhoneme(
+        data_path=f"{dataset_root}/data/",
+        partition="test",
+        tmin=tmin,
+        tmax=tmax,
+    )
+
+    # test_dataset = LibriBrainCompetitionHoldout(
+    #     data_path=f"{dataset_root}/data/",
+    #     task="phoneme"
+    # )
+
+    if save_examples:
+        for ds in (val_dataset, test_dataset, train_dataset):
+            os.makedirs(f"{dataset_root}/examples/{ds.partition}", exist_ok=True)
+            for i, (example, _) in enumerate(ds):
+                torch.save(example, f"{dataset_root}/examples/{ds.partition}/{i}.pt")
+
+    # compute maximum absolute value of training data
+    # max_val = 10.0
+    # for example, _ in train_dataset:
+    #    max_val = max(max_val, torch.max(torch.abs(example)))
+
+    kwargs_train = {
+        "base_class": "IndexedLabelGroupedDataset",
+        "grouped_samples_std": grouped_samples_std,
+        "grouped_samples_mean": grouped_samples_mean,
+        "training": True,
+        "augmentations": augmentations,
+        "quant_levels": quant_levels,
+        "quantize": quantize,
+        "normalize": normalize,
+        **dataset_args,
+    }
+
+    kwargs_train = {
+        "base_class": "SessionGroupedDatasetFull",
+        "grouped_samples": grouped_samples_mean,
+        "training": True,
+        "augmentations": augmentations,
+        "quant_levels": quant_levels,
+        "quantize": quantize,
+        "normalize": normalize,
+        **dataset_args,
+    }
+
+    dataset_class = DATASET_CLASSES[dataset_class]
+
+    averaged_train = dataset_class(train_dataset, **kwargs_train)
+
+    kwargs_val = {
+        "base_class": "SessionGroupedDataset",
+        "grouped_samples": 100,
+        "quant_levels": quant_levels,
+        "quantize": quantize,
+        "normalize": normalize,
+    }
+
+    averaged_val = dataset_class(val_dataset, **kwargs_val)
+    averaged_test = dataset_class(test_dataset, **kwargs_val)
+
+    val_weights = averaged_val.dataset.class_weights
+    averaged_train.dataset.class_weights = val_weights
+
+    return Split(averaged_train, averaged_val, averaged_test)

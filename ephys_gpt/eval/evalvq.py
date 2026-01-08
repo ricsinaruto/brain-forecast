@@ -11,20 +11,19 @@ DEBUG = False
 
 
 class EvalVQ(EvalFlow):
-    """Evaluation for BrainOmniSystem (tokeniser + AR forecaster).
-    TODO: not tested
+    """Evaluation for BrainOmniSystem (tokeniser + AR forecaster). TODO: not tested.
 
-    Computes reconstruction MSE curves by reconstructing predicted latent
-    codes back to channel space using the tokenizer decoder. Metrics mirror
-    GPT2MEG outputs (hist_mse.npy, future_mse.npy, PSD/Cov for free‑running).
+    Computes reconstruction MSE curves by reconstructing predicted latent codes back to
+    channel space using the tokenizer decoder. Metrics mirror GPT2MEG outputs
+    (hist_mse.npy, future_mse.npy, PSD/Cov for free‑running).
     """
 
     # ------------------------ helpers ------------------------
     def _get_latent_codes(self, inputs) -> torch.Tensor:
         """Return latent codes with shape (B, C_latent, Nq, T_lat)."""
         # Tokeniser returns (B, C_latent, T_lat, Nq)
-        _, _, codes = self.model.vqvae.encode(inputs)
-        return codes
+        _, _, codes, shape = self.model.vqvae.encode(inputs)
+        return codes, shape
 
     @staticmethod
     def _stage_argmax(logits: torch.Tensor) -> torch.Tensor:
@@ -49,7 +48,7 @@ class EvalVQ(EvalFlow):
             else:
                 inputs = inputs.to(self.device)
 
-            codes_bcq_t = self._get_latent_codes(inputs)  # (B,Cq,Nq,T)
+            codes_bcq_t, _ = self._get_latent_codes(inputs)  # (B,Cq,Nq,T)
             B, Cq, Nq, T = codes_bcq_t.shape
 
             H = T - 1
@@ -61,7 +60,7 @@ class EvalVQ(EvalFlow):
                 max_h = min(H, t)
                 for h in range(1, max_h + 1):
                     # context codes: (B,Cq,Nq,h)
-                    ctx = codes_bcq_t[..., t - h : t]
+                    ctx = codes_bcq_t[..., t - h: t]
                     logits = self.model.forecaster(ctx)  # (B,Cq,Nq,h,K)
                     next_idx = self._stage_argmax(logits)[..., -1]  # (B,Cq,Nq)
 
@@ -103,14 +102,14 @@ class EvalVQ(EvalFlow):
             else:
                 inputs = inputs.to(self.device)
 
-            codes = self._get_latent_codes(inputs)  # (B,Cq,Nq,T)
+            codes, _ = self._get_latent_codes(inputs)  # (B,Cq,Nq,T)
             B, Cq, Nq, T = codes.shape
             if T <= N:
                 continue
 
             ctx_len = T - N
             for t in range(ctx_len, T - N + 1):
-                seq = codes[..., t - ctx_len : t]  # (B,Cq,Nq,ctx)
+                seq = codes[..., t - ctx_len: t]  # (B,Cq,Nq,ctx)
                 for k in range(N):
                     logits = self.model.forecaster(seq)  # (B,Cq,Nq,S,K)
                     next_idx = self._stage_argmax(logits)[..., -1]  # (B,Cq,Nq)
@@ -143,33 +142,25 @@ class EvalVQ(EvalFlow):
     @torch.inference_mode()
     def step_free_running(self) -> None:  # type: ignore[override]
         sample_args = {
-            "strategy": self.eval_args["gen_sampling"],
+            "strategy": self.eval_args.get("gen_sampling", "top_p"),
             "temperature": self.eval_args.get("temperature", 1.0),
             "top_k": self.eval_args.get("top_k", 0),
-            "top_p": self.eval_args.get("top_p", 0.0),
+            "top_p": self.eval_args.get("top_p", 0.8),
         }
 
         total_steps = int(self.eval_args["gen_seconds"] * self.sfreq)
         # seed from a random trial
-        inputs, _ = next(iter(self.test_loader))
-        if isinstance(inputs, (list, tuple)):
-            inputs = inputs[0]
+        ctx, _, _, cond_sequence_full = self._get_initial_example(total_steps)
+        cond_sequence_full = cond_sequence_full.to(ctx.device)
 
-        if isinstance(inputs, (list, tuple)):
-            inputs = tuple(x.to(self.device) for x in inputs)
-        else:
-            inputs = inputs.to(self.device)
+        seq, shape = self._get_latent_codes(ctx)  # (B,L*T)
+        R = seq.shape[-1] // ctx.shape[-1]
+        h = int((R * self.eval_args["temporal_reduction"]) ** 0.5)
 
-        inputs = inputs[:1]
-        T = inputs.shape[-1]
-
-        seq = self._get_latent_codes(inputs)  # (B,L*T)
-        L = seq.shape[1] // T * self.eval_args["temporal_reduction"]
-        h = int(L**0.5)
-        max_tokens = seq.shape[1]
-        total_steps *= L
+        max_tokens = seq.shape[-1]
+        total_steps *= R
         global_seq = seq
-
+        cond_emb = None
         x_rec = []
 
         # grow until reconstructed length covers desired seconds
@@ -177,16 +168,21 @@ class EvalVQ(EvalFlow):
             if seq.shape[-1] > max_tokens:
                 seq = seq[..., 1:]
 
-            logits = self.model.transformer(seq, causal=True)
-            next_idx = sample(logits[:, -1], **sample_args).unsqueeze(-1)
-            seq = torch.cat([seq, next_idx], dim=-1)
-            global_seq = torch.cat([global_seq, next_idx], dim=-1)
+            if cond_sequence_full is not None:
+                cond_len = seq.shape[-1] // R
+                cond_actual = cond_sequence_full[..., i // R: i // R + cond_len]
+                cond_emb = self.model.create_cond_emb(cond_actual, shape)
+
+            logits = self.model.transformer(seq, causal=True, cond=cond_emb)
+            next_token = sample(logits[:, -1], **sample_args).unsqueeze(-1)
+            seq = torch.cat([seq, next_token], dim=-1)
+            global_seq = torch.cat([global_seq, next_token], dim=-1)
 
             if i & max_tokens == 0:
                 local_seq = global_seq[:, -max_tokens:].reshape(1, -1, h, h)
                 x_rec.append(self._reconstruct_codes(local_seq))
 
-        x_rec = torch.cat(x_rec, dim=-1)
+        x_rec = torch.cat(x_rec[1:], dim=-1)
 
         arr = self._images_to_channels(x_rec).squeeze(0).cpu().numpy()
         np.save(self.out_dir / "generated.npy", arr)

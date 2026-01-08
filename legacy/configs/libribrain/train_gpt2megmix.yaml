@@ -1,0 +1,53 @@
+model_config: configs/libribrain/gpt2megmix.yaml
+augmentations: configs/libribrain/augs.yaml
+
+save_dir: /vol/data/trainings/libribrain/gpt2megmix # trainings/cnnlstm 
+resume_from: null
+
+model_name: ClassifierQuantized
+loss_name: CrossEntropyWeighted
+dataset_name: libribrain
+
+datasplitter:
+  dataset_class: GroupedDatasetAugmented
+  dataset_root: /vol/data/LibriBrain  # /Users/richard/Datasets/LibriBrain
+  grouped_samples_std: 20  # fixed
+  grouped_samples_mean: 100  # fixed
+  augmentations: configs/libribrain/augs.yaml
+  quantize: true
+  quant_levels: 512
+  normalize: false
+
+dataloader:
+  batch_size: 256  # max for gpu memory
+  num_workers: 16
+  prefetch_factor: 2  # 2 is best
+  pin_memory: true
+  persistent_workers: true
+
+loss:
+  label_smoothing: 0.1
+  l1: 0.0
+
+lightning:
+  lr: 2.0e-4  # reduce if loss is stuck
+  weight_decay: 0.01
+  compile: true
+  log_samples: false
+  log_psd: false
+  sfreq: 200
+  # Optional: configure a learning rate scheduler from torch.optim.lr_scheduler
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 2.0e-6
+    T_max: 50
+
+trainer:
+  max_epochs: 50
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 20
+  precision: 16-mixed
+  gradient_clip_val: 1.0

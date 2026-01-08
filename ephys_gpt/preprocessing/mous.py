@@ -10,8 +10,7 @@ class MOUS(Ephys):
     def load(self) -> dict[str, Any]:
         """Load Omega dataset and generate file and subject names.
 
-        Returns:
-            dict[str, Any]: Dictionary containing the file and subject names.
+        Returns:     dict[str, Any]: Dictionary containing the file and subject names.
         """
 
         files = []
@@ -88,11 +87,11 @@ class MOUSConditioned(MOUS):
         """Extract raw data and metadata from MNE Raw object with memory efficiency.
 
         Args:
-            fif_file: Path to the fif file
-            subject: Subject name
+        fif_file: Path to the fif file
+        subject: Subject name
 
         Returns:
-            Dictionary containing raw data and metadata
+        Dictionary containing raw data and metadata
         """
         data = super().extract_raw(fif_file, subject)
         if "rest" in fif_file:
@@ -137,7 +136,7 @@ class MOUSConditioned(MOUS):
             sample_idx, _, code = event
             if code in start_codes:
                 end_sample = n_samples
-                for next_event in events[i + 1 :]:
+                for next_event in events[i + 1:]:
                     if next_event[2] == 15:
                         end_sample = next_event[0]
                         break

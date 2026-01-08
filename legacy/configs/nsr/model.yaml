@@ -1,0 +1,4 @@
+input_dim: 273
+hidden_dim: 1024
+num_layers: 12
+micro_steps: 4  # try higher

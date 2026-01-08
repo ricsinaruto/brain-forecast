@@ -1,0 +1,59 @@
+# Data loader parameters
+# example_seconds and overlap_seconds refer to the raw signal duration for each example
+# expressed in seconds
+
+# Augmentations are optional and can be enabled by setting parameters
+
+# Separate model configuration file
+model_config: configs/tasa3d/model_omega_small.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: /vol/data/trainings/omega/2sub/1to50hz/tasa3d/
+resume_from: null
+
+model_name: TASA3D
+loss_name: CrossEntropy
+
+datasplitter:
+  dataset_class: ChunkDatasetImageQuantized
+  dataset_root: "/vol/data/datasets/Omega/preprocessed_1to50hz_small"
+  example_seconds: 2.0
+  overlap_seconds: 1.0
+  val_ratio: 0.1
+  test_ratio: 0.1
+  dataset_kwargs:
+    fill_value: 127
+    image_size: 32
+
+dataloader:
+  batch_size: 128  # 512
+  num_workers: 16
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+
+loss:
+  label_smoothing: 0.0
+  l1: 0.0
+
+lightning:
+  lr: 1.0e-3
+  weight_decay: 0.01
+  compile: true
+  log_samples: false
+  log_psd: False
+  sfreq: 200
+  lr_scheduler:
+    class_name: CosineAnnealingLR
+    eta_min: 1.0e-5
+    T_max: 100
+
+trainer:
+  max_epochs: 100
+  accelerator: cuda
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 200
+  precision: 16-mixed
+  gradient_clip_val: 10.0

@@ -1,7 +1,7 @@
 num_channels: 272
 vocab_size: 256
-d_model: 256
-layers: 4
+d_model: 64
+layers: 24
 trf_block: STConvBlock  # STGPTBlock, STGPTBlockParallel, STConvBlock
 
 trf_args:
@@ -10,12 +10,12 @@ trf_args:
   conv_kernel: [5, 5, 5]
 
   attn_args:
-    d_model: 256
+    d_model: 64
     nheads: 8
     dropout: 0.0
     rope: true
 
   mlp_args:
-    d_model: 256
+    d_model: 64
     # num_experts: 4
     # experts_per_token: 2

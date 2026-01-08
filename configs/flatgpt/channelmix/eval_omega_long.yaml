@@ -1,0 +1,57 @@
+dataloader:
+  batch_size: 2
+  num_workers: 8
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 2
+datasplitter:
+  cache_dir: /vol/data/datasets/omega/full/cache/1to50hz_ss_30s
+  dataset_class: ChunkDataset3D
+  dataset_root: /vol/data/datasets/omega/full/1to50hz_ss
+  example_seconds: 30
+  overlap_seconds: 15
+  refresh_cache: false
+  test_ratio: 0.1
+  val_ratio: 0.1
+eval_runner:
+  ckpt_path: /vol/data/trainings/omega/1to50hz_ss/flatgpt/channelmix/logs/version_16/checkpoints/last-checkpoint-epoch00033.ckpt
+  enabled: true
+  epoch: 34
+  generate:
+    enabled: true
+    kv_overlap: 100
+    num_runs: 3
+    seconds: 60
+    top_p: 0.8
+    temperature: 3.0
+    strategy: top_p
+  max_batches: 1000
+  modal_app: ephys-gpt
+  modal_function: runevals
+  mu: 255
+  num_examples: 0
+  step: 10032
+  use_modal: true
+  version: 16
+lightning:
+  compile: false
+  lr: 0.0002
+  lr_scheduler:
+    T_max: 100
+    class_name: CosineAnnealingLR
+    eta_min: 2.0e-05
+  weight_decay: 0.1
+loss_name: CrossEntropyWithCodes
+model_config: configs/flatgpt/channelmix/model.yaml
+model_name: FlatGPTMix
+resume_from: null
+save_dir: /vol/data/trainings/omega/1to50hz_ss/flatgpt/channelmix
+trainer:
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  checkpoint_cadence_epochs: 1
+  default_root_dir: /vol/data/trainings/omega/1to50hz_ss/flatgpt/channelmix
+  gradient_clip_val: 1.0
+  log_every_n_steps: 100
+  max_epochs: 100
+  precision: bf16-mixed

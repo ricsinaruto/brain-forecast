@@ -1,0 +1,37 @@
+# Configuration for preprocessing pipeline
+# Paths should be adjusted per environment
+
+# Root directory containing raw dataset
+data_path: "/vol/data/datasets/Omega/raw"
+stage1_path: "/vol/data/datasets/Omega/preprocessed_1to50hz500hz_ss_cont"
+save_path: "/vol/data/datasets/Omega/preprocessed_1to50hz500hz_ss_cont"
+stage3_save_path: "/vol/data/datasets/Omega/preprocessed_1to50hz500hz_ss_txt68"
+skip_done: false
+
+# Length of each saved chunk in seconds
+chunk_seconds: 60
+text_num_bins: 128
+stage3_quantize: true
+text_processor_cls: TextProcessor
+
+
+
+
+# Number of dask workers used by osl-ephys
+n_workers: 16
+
+# Length of each saved chunk in seconds
+chunk_seconds: 60
+sfreq: null
+source_space: true
+interpolate_bads: true
+
+# Optional path to a custom OSL preprocessing config
+osl_config: configs/preproc/osl_omega.yaml
+
+# Parameters for additional stage-2 processing
+preproc_config:
+  normalize:
+    method: "robust"
+  clip:
+    std_factor: 3

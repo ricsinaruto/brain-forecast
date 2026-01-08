@@ -1,0 +1,31 @@
+# tokenizer parameters
+tokenizer_kwargs:
+  window_length: 128  # paper uses 2 seconds, we use 1.28s
+  n_filters: 64  # 32
+  ratios: [2, 2, 2]  # 8,4,2
+  kernel_size: 7  # 5
+  last_kernel_size: 7  # 5
+  n_dim: 512  # 256
+  n_neuro: 16  # 16
+  n_head: 16  # 4
+  codebook_size: 1024  # 512
+  codebook_dim: 512  # 256
+  num_quantizers: 4  # 4
+  rotation_trick: true  # true
+  quantize_optimize_method: "ema"  # "ema"
+  mask_ratio: 0.0  # 0.25, lower value lowers loss
+  dropout: 0.0  # 0.0
+  noise_std: 0.0  # 0.1
+  normalize: false  # true
+  num_sensors: 68
+
+
+# lm parameters
+overlap_ratio: 0.0  # not sure if this is causal or not
+lm_dim: 512  # 512
+lm_head: 16  # 8
+lm_depth: 24  # 12
+lm_dropout: 0.0  # 0.0
+num_quantizers_used: 4  # 4
+freeze_tokenizer: true
+tokenizer_path: /vol/data/trainings/omega/2sub/1to50hz_ss/brainomni_tok/lightning_logs/version_15/checkpoints/best-checkpoint.ckpt

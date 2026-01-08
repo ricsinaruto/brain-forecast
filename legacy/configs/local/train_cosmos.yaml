@@ -1,0 +1,46 @@
+model_config: configs/models/cosmos_tokenizer.yaml
+augmentations: configs/augmentations.yaml
+
+save_dir: trainings/cosmos_tokenizer
+resume_from: null
+
+model_name: CosmosTokenizer
+loss_name: CosmosTokenizerLoss
+
+datasplitter:
+  dataset_class: ChunkDatasetImageReconstruction
+  dataset_root: /path/to/preprocessed
+  example_seconds: 1.0
+  overlap_seconds: 0.0
+  val_ratio: 0.1
+  test_ratio: 0.1
+  dataset_kwargs:
+    image_size: 32
+
+dataloader:
+  batch_size: 4
+  num_workers: 4
+  prefetch_factor: null
+  pin_memory: false
+  persistent_workers: false
+
+loss:
+  recon_weight: 1.0
+  quant_weight: 1.0
+
+lightning:
+  lr: 2.0e-4
+  weight_decay: 0.0
+  compile: false
+  log_samples: false
+  log_psd: false
+  sfreq: 200
+
+trainer:
+  max_epochs: 200
+  accelerator: auto
+  profiler: null
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 50
+  gradient_clip_val: 1.0

@@ -1,0 +1,8 @@
+tokenizer:
+  text_dir: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt
+  vocab_size: 32768
+  min_frequency: 2
+  save_dir: /vol/data/datasets/Omega/preprocessed_1to50hz_ss_5bit_txt/tokenizer
+  split_spaces: true
+  plot_distribution: true
+  plot_distribution_top_k: 1000

@@ -1,0 +1,30 @@
+in_channels: 306
+channel_dropout_p: 0.5  # 0.5
+lstm_dropout: 0.2  # 0.2
+conv_dropout: 0.2  # 0.2
+head_dropout: 0.0  # 0.0
+
+hidden_channels: [256, 512]  # [256, 512]
+kernels: [3, 3]  # [3, 3]
+strides: [1, 2]  # [1, 2]
+norm: group  # group
+ch_attn: null  # try without se
+
+head_inputs: 1024  # if flatten, this is the number of channels * sequence length
+pooling: last  # last
+num_classes: 39
+
+lstm_num_layers: 4  # 0
+num_trf_blocks: 0  # 8
+
+attn_args:
+  d_model: 512
+  nheads: 8  # 8
+  dropout: 0.2  # 0.2
+  rope: true
+
+mlp_type: standard  # standard
+mlp_args:
+  d_model: 512
+  # num_experts: 8
+  # experts_per_token: 2

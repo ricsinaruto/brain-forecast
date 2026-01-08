@@ -5,47 +5,31 @@ from typing import Tuple, Optional, Literal
 
 
 class DiscretizedMixLogisticLoss(nn.Module):
-    """
-    Negative log-likelihood for Discretized Mixture of Logistics (DMoL).
+    """Negative log-likelihood for Discretized Mixture of Logistics (DMoL).
 
-    Modes
-    -----
-    - 'independent': each channel is modeled with its own K-component mixture.
-        Expected output channels: channels * 3*K
-          (mix_logits, means, log_scales per channel)
-        Joint prob = ∏_c [ Σ_k π_{c,k} * P_bin(x_c | μ_{c,k}, s_{c,k}) ].
-    - 'pixelcnnpp': shared K-component mixture over RGB with coupling.
-        Expected output channels: 10*K laid out as:
-            [K mix_logits | 3K means | 3K log_scales | 3K coeffs]
-        Joint prob = Σ_k π_k ∏_{c∈{R,G,B}} P_bin(x_c | μ'_c,k, s_{c,k})
-        with μ'_G,k = μ_G,k + a_k * R,  μ'_B,k = μ_B,k + b_k * R + c_k * G.
+    Modes ----- - 'independent': each channel is modeled with its own K-component
+    mixture.     Expected output channels: channels * 3*K       (mix_logits, means,
+    log_scales per channel)     Joint prob = ∏_c [ Σ_k π_{c,k} * P_bin(x_c | μ_{c,k},
+    s_{c,k}) ]. - 'pixelcnnpp': shared K-component mixture over RGB with coupling.
+    Expected output channels: 10*K laid out as:         [K mix_logits | 3K means | 3K
+    log_scales | 3K coeffs]     Joint prob = Σ_k π_k ∏_{c∈{R,G,B}} P_bin(x_c | μ'_c,k,
+    s_{c,k})     with μ'_G,k = μ_G,k + a_k * R,  μ'_B,k = μ_B,k + b_k * R + c_k * G.
 
-    Inputs
-    ------
-    pred : float tensor of shape
-        - independent: [B, channels*3K, *spatial]
-        - pixelcnnpp: [B, 10K, *spatial]
-    target : int tensor of shape [B, channels, *spatial], with values in [0, bins-1].
-    mask : optional broadcastable mask over [B, 1 or channels, *spatial]
-      (1=keep, 0=ignore).
+    Inputs ------ pred : float tensor of shape     - independent: [B, channels*3K,
+    *spatial]     - pixelcnnpp: [B, 10K, *spatial] target : int tensor of shape [B,
+    channels, *spatial], with values in [0, bins-1]. mask : optional broadcastable mask
+    over [B, 1 or channels, *spatial]   (1=keep, 0=ignore).
 
-    Args
-    ----
-    num_mixtures: K
-    bins: number of quantization bins (e.g., 256 for 8-bit, 65536 for 16-bit PCM)
-    value_range: tuple (min, max) for the continuous scale you map bins to.
-                 Common choices: (-1, 1) for images/audio, or (0, 1).
-    channels: number of channels in the target (1 for audio/grayscale, 3 for RGB)
-    mode: 'independent' or 'pixelcnnpp'
-    reduction: 'mean' | 'sum' | 'none'
-    clamp_log_scale: (lo, hi) clamp for predicted log_scales to stabilize training
-    tanh_coeffs: if True (default), apply tanh to PixelCNN++ coupling coeffs
-    eps: numerical epsilon
+    Args ---- num_mixtures: K bins: number of quantization bins (e.g., 256 for 8-bit,
+    65536 for 16-bit PCM) value_range: tuple (min, max) for the continuous scale you map
+    bins to.              Common choices: (-1, 1) for images/audio, or (0, 1). channels:
+    number of channels in the target (1 for audio/grayscale, 3 for RGB) mode:
+    'independent' or 'pixelcnnpp' reduction: 'mean' | 'sum' | 'none' clamp_log_scale:
+    (lo, hi) clamp for predicted log_scales to stabilize training tanh_coeffs: if True
+    (default), apply tanh to PixelCNN++ coupling coeffs eps: numerical epsilon
 
-    Utility
-    -------
-    - use DiscretizedMixLogisticLoss.expected_out_channels(...)
-      to size your output head.
+    Utility ------- - use DiscretizedMixLogisticLoss.expected_out_channels(...)   to
+    size your output head.
     """
 
     def __init__(
@@ -102,9 +86,7 @@ class DiscretizedMixLogisticLoss(nn.Module):
         target: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Returns a scalar (mean/sum) or per-position loss depending on `reduction`.
-        """
+        """Returns a scalar (mean/sum) or per-position loss depending on `reduction`."""
         if self.mode == "independent":
             nll = self._nll_independent(pred, target)
         else:
@@ -169,11 +151,8 @@ class DiscretizedMixLogisticLoss(nn.Module):
     def _nll_independent(
         self, pred: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
-        """
-        pred: [B, channels*3K, *spatial]
-        target: [B, channels, *spatial] integers 0..bins-1
-        returns: [B, *spatial] position-wise NLL
-        """
+        """Pred: [B, channels*3K, *spatial] target: [B, channels, *spatial] integers
+        0..bins-1 returns: [B, *spatial] position-wise NLL."""
         B, Cout, *sp = pred.shape
         C = self.channels
         K = self.K
@@ -196,8 +175,8 @@ class DiscretizedMixLogisticLoss(nn.Module):
         # Reshape and split parameters
         pred = pred.view(B, C, 3 * K, *sp)
         mix_logits = pred[:, :, 0:K, ...]
-        means = pred[:, :, K : 2 * K, ...]
-        log_scales = pred[:, :, 2 * K : 3 * K, ...]
+        means = pred[:, :, K: 2 * K, ...]
+        log_scales = pred[:, :, 2 * K: 3 * K, ...]
         log_mix = F.log_softmax(mix_logits, dim=2)  # over K
 
         # Map integer bins to continuous centers
@@ -218,13 +197,11 @@ class DiscretizedMixLogisticLoss(nn.Module):
         return -log_p
 
     def _nll_pixelcnnpp(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        PixelCNN++ style shared mixture with RGB coupling.
+        """PixelCNN++ style shared mixture with RGB coupling.
 
-        pred: [B, 10K, *spatial] laid out as:
-            [K mix_logits | 3K means | 3K log_scales | 3K coeffs]
-        target: [B, 3, *spatial] with integer bins in [0, bins-1]
-        returns: [B, *spatial] position-wise NLL
+        pred: [B, 10K, *spatial] laid out as:     [K mix_logits | 3K means | 3K
+        log_scales | 3K coeffs] target: [B, 3, *spatial] with integer bins in [0,
+        bins-1] returns: [B, *spatial] position-wise NLL
         """
         B, Cout, *sp = pred.shape
         K = self.K
@@ -247,13 +224,13 @@ class DiscretizedMixLogisticLoss(nn.Module):
 
         # Split parameters
         off = 0
-        mix_logits = pred[:, off : off + K, ...]
+        mix_logits = pred[:, off: off + K, ...]
         off += K
-        means = pred[:, off : off + 3 * K, ...]
+        means = pred[:, off: off + 3 * K, ...]
         off += 3 * K
-        log_scales = pred[:, off : off + 3 * K, ...]
+        log_scales = pred[:, off: off + 3 * K, ...]
         off += 3 * K
-        coeffs = pred[:, off : off + 3 * K, ...]
+        coeffs = pred[:, off: off + 3 * K, ...]
         off += 3 * K
 
         mix_logits = mix_logits.view(B, K, *sp)  # [B,K,*]

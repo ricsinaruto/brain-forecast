@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from typing import Any
 import torch
@@ -5,35 +6,46 @@ from torch import Tensor
 from sklearn.cluster import MiniBatchKMeans
 
 
-def mulaw_torch(x: torch.Tensor, mu: int = 255) -> tuple[torch.Tensor, torch.Tensor]:
+# Precomputed log1p values for common mu values to avoid repeated tensor creation
+_LOG1P_CACHE: dict[int, float] = {}
+
+
+def _get_log1p_mu(mu: int) -> float:
+    """Get precomputed log1p(mu) value, caching for repeated calls."""
+    if mu not in _LOG1P_CACHE:
+        _LOG1P_CACHE[mu] = math.log1p(mu)
+    return _LOG1P_CACHE[mu]
+
+
+def mulaw_torch(x: torch.Tensor, mu: int = 255) -> torch.Tensor:
+    """Torch version of mu-law companding and quantization.
+
+    Optimized version that: - Avoids unnecessary tensor allocations (precomputes
+    log1p(mu) as scalar) - Works element-wise without flattening/reshaping - Uses fused
+    operations where possible
+
+    Args:     x: Input tensor (float, expected in [-1, 1])     mu: Mu parameter (number
+    of quantization levels - 1)
+
+    Returns:     Quantized tensor with values in [0, mu] as long dtype
     """
-    Torch version of mu-law companding and quantization.
+    # Precomputed scalar division factor (avoids tensor creation per call)
+    log1p_mu_inv = 1.0 / _get_log1p_mu(mu)
 
-    Args:
-        x: Input tensor (float, expected in [-1, 1])
-        mu: Mu parameter (number of quantization levels - 1)
+    # Clip to valid range (in-place on a clone to avoid modifying input)
+    x_clipped = x.clamp(-0.999, 0.999)
 
-    Returns:
-        Tuple of (quantized tensor, reconstructed tensor)
-    """
-    shape = x.shape
-    x_flat = x.reshape(-1)
-
-    # clip to -1, 1
-    x_flat = torch.clamp(x_flat, -0.999, 0.999)
-
-    # Mu-law compression
-    compressed = (
-        torch.sign(x_flat)
-        * torch.log1p(mu * torch.abs(x_flat))
-        / torch.log1p(torch.tensor(float(mu), device=x.device))
-    )
+    # Mu-law compression: sign(x) * log1p(mu * |x|) / log1p(mu)
+    # Fused into fewer operations
+    abs_x = x_clipped.abs()
+    compressed = x_clipped.sign() * torch.log1p(mu * abs_x) * log1p_mu_inv
 
     # Quantize to integers in [0, mu]
-    compressed = (compressed + 1) * 0.5 * mu + 0.5
-    digitized = compressed.long()
+    # (compressed + 1) * 0.5 * mu + 0.5 = compressed * (mu/2) + (mu/2) + 0.5
+    half_mu = mu * 0.5
+    digitized = (compressed * half_mu + half_mu + 0.5).long()
 
-    return digitized.reshape(shape)
+    return digitized
 
 
 def mulaw(x: np.ndarray, mu: int = 255) -> tuple[np.ndarray, np.ndarray]:
@@ -65,9 +77,7 @@ def mulaw(x: np.ndarray, mu: int = 255) -> tuple[np.ndarray, np.ndarray]:
 
 
 def mulaw_inv(x: np.ndarray, mu: int = 255) -> np.ndarray:
-    """
-    Inverse mu-law companding.
-    """
+    """Inverse mu-law companding."""
     # Scale from [0, mu] to [-1, 1]
     x_scaled = (x.astype(np.float32)) / mu * 2 - 1
 
@@ -78,7 +88,10 @@ def mulaw_inv(x: np.ndarray, mu: int = 255) -> np.ndarray:
 
 
 def mulaw_inv_torch(x_int: Tensor, mu: int = 255) -> Tensor:
-    """Inverse µ‑law for integer bins ∈ [0, mu]. Returns float tensor ∈ [‑1, 1]."""
+    """Inverse µ‑law for integer bins ∈ [0, mu].
+
+    Returns float tensor ∈ [‑1, 1].
+    """
     mu = float(mu)
     x = x_int.float()
     x_norm = x / mu  # [0,1]
@@ -92,10 +105,9 @@ def adaptive_quantize(
 ) -> dict[str, Any]:
     """Adaptive quantization using k-means clustering for better reconstruction.
 
-    Args:
-        data: Dictionary containing raw_array
-        n_bits: Number of bits for quantization (default 8 bits = 256 levels)
-        batch_size: Batch size for mini-batch k-means
+    Args:     data: Dictionary containing raw_array     n_bits: Number of bits for
+    quantization (default 8 bits = 256 levels)     batch_size: Batch size for mini-batch
+    k-means
     """
     n_clusters = 2**n_bits
     raw_shape = data["raw_array"].shape

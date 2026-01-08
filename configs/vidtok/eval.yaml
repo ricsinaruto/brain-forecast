@@ -1,0 +1,61 @@
+dataloader:
+  batch_size: 2
+  num_workers: 16
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 4
+datasplitter:
+  dataset_class: ChunkDatasetInterpolatedImage
+  dataset_kwargs:
+    image_size: 48
+    r_max_factor: 4.0
+    sigma_scale: 0.75
+  dataset_root: /vol/data/datasets/omega/2sub/1to50hz_cont
+  example_seconds: 10.24
+  overlap_seconds: 0.0
+  test_ratio: 0.1
+  val_ratio: 0.1
+eval_runner:
+  ckpt_path: /vol/data/trainings/omega/2sub/1to50hz/vidtok/logs/version_18/checkpoints/last-checkpoint-epoch00008.ckpt
+  enabled: true
+  epoch: 9
+  lit_module: VidtokLightning
+  max_batches: 10
+  modal_app: ephys-gpt
+  modal_function: runevals
+  num_examples: 5
+  step: 6450
+  use_modal: true
+  version: 18
+lightning:
+  compile: false
+  ema_decay: null
+  lr: 2.0e-06
+  optimizer:
+    params:
+      weight_decay: 0.0
+    target: torch.optim.AdamW
+loss:
+  dims: 3
+  disc_start: 201
+  disc_type: 2d
+  disc_weight: 0.2
+  gen_loss_cross_entropy: true
+  learn_logvar: true
+  lecam_loss_weight: 0.005
+  perceptual_weight: 0.0
+  regularization_weights:
+    aux_loss: 1.0
+    kl_loss: 1.0e-06
+model_config: configs/vidtok/model888_32k.yaml
+resume_from: null
+save_dir: /vol/data/trainings/omega/2sub/1to50hz/vidtok
+trainer:
+  accelerator: cuda
+  check_val_every_n_epoch: 1
+  checkpoint_cadence_epochs: 1
+  default_root_dir: /vol/data/trainings/omega/2sub/1to50hz/vidtok
+  log_every_n_steps: 10
+  max_epochs: 200
+  precision: bf16-mixed
+  tune_batch_size: true
